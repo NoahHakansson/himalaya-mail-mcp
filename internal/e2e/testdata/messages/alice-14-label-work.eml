@@ -1,0 +1,9 @@
+From: Dave Example <dave@example.test>
+To: Alice Example <alice@example.test>
+Subject: Work label item
+Date: Wed, 14 Oct 2026 15:00:00 +0000
+Message-ID: <alice-14@fixture.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Message carrying the Work label.

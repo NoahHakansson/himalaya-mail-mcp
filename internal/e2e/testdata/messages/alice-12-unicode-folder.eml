@@ -1,0 +1,10 @@
+From: =?UTF-8?Q?Zo=C3=AB?= <zoe@example.test>
+To: Alice Example <alice@example.test>
+Subject: =?UTF-8?Q?In_the_R=C3=A9sum=C3=A9_folder?=
+Date: Mon, 12 Oct 2026 09:30:00 +0000
+Message-ID: <alice-12@fixture.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+Message stored under a Unicode mailbox name.

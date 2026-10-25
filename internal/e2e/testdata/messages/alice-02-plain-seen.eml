@@ -1,0 +1,11 @@
+From: Dave Example <dave@example.test>
+To: Alice Example <alice@example.test>
+Cc: Carol Example <carol@example.test>
+Subject: Plain message already read
+Date: Tue, 06 Oct 2026 10:15:00 +0200
+Message-ID: <alice-02@fixture.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+This message is seeded with \Seen.

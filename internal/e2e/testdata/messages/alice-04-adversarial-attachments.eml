@@ -1,0 +1,87 @@
+From: Mallory Example <mallory@example.test>
+To: Alice Example <alice@example.test>
+Subject: Attachments with adversarial filenames
+Date: Thu, 08 Oct 2026 12:00:00 +0000
+Message-ID: <alice-04@fixture.test>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mixed-boundary-04"
+
+--mixed-boundary-04
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+Ten attachments follow, each with a hostile or unusual filename.
+
+--mixed-boundary-04
+Content-Type: application/x-sh; name="../../evil.sh"
+Content-Disposition: attachment; filename="../../evil.sh"
+Content-Transfer-Encoding: base64
+
+IyEvYmluL3NoCmVjaG8gImZpeHR1cmU6IHRoaXMgYXR0YWNobWVudCBtdXN0IG5ldmVyIGJlIGV4
+ZWN1dGVkIgpleGl0IDEK
+
+--mixed-boundary-04
+Content-Type: text/plain; charset=utf-8; name="a/b.txt"
+Content-Disposition: attachment; filename="a/b.txt"
+Content-Transfer-Encoding: base64
+
+Rml4dHVyZSB0ZXh0IGF0dGFjaG1lbnQuCg==
+
+--mixed-boundary-04
+Content-Type: text/plain; charset=utf-8
+Content-Disposition: attachment; filename="very-long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.txt"
+Content-Transfer-Encoding: base64
+
+Rml4dHVyZSB0ZXh0IGF0dGFjaG1lbnQuCg==
+
+--mixed-boundary-04
+Content-Type: application/pdf
+Content-Disposition: attachment; filename*=UTF-8''r%C3%A9sum%C3%A9%20%F0%9F%93%8E%20%D1%84%D0%B0%D0%B9%D0%BB.pdf
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKJSBmaXh0dXJlIHBsYWNlaG9sZGVyLCBub3QgYSByZWFsIFBERgo=
+
+--mixed-boundary-04
+Content-Type: text/plain; charset=utf-8; name="=?UTF-8?B?0J7RgtGH0ZHRgiAyMDI2IOKcky50eHQ=?="
+Content-Disposition: attachment; filename="=?UTF-8?B?0J7RgtGH0ZHRgiAyMDI2IOKcky50eHQ=?="
+Content-Transfer-Encoding: base64
+
+Rml4dHVyZSB0ZXh0IGF0dGFjaG1lbnQuCg==
+
+--mixed-boundary-04
+Content-Type: text/plain; charset=utf-8
+Content-Disposition: attachment; filename="-rf.txt"
+Content-Transfer-Encoding: base64
+
+Rml4dHVyZSB0ZXh0IGF0dGFjaG1lbnQuCg==
+
+--mixed-boundary-04
+Content-Type: text/plain; charset=utf-8
+Content-Disposition: attachment; filename="/etc/passwd"
+Content-Transfer-Encoding: base64
+
+Rml4dHVyZSB0ZXh0IGF0dGFjaG1lbnQuCg==
+
+--mixed-boundary-04
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename="..\\..\\windows.bat"
+Content-Transfer-Encoding: base64
+
+Rml4dHVyZSB0ZXh0IGF0dGFjaG1lbnQuCg==
+
+--mixed-boundary-04
+Content-Type: application/octet-stream
+Content-Disposition: attachment
+Content-Transfer-Encoding: base64
+
+Rml4dHVyZSB0ZXh0IGF0dGFjaG1lbnQuCg==
+
+--mixed-boundary-04
+Content-Type: image/png; name="pixel.png"
+Content-Disposition: inline; filename="pixel.png"
+Content-ID: <pixel-04@fixture.test>
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==
+
+--mixed-boundary-04--

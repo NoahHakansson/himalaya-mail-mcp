@@ -1,0 +1,10 @@
+From: =?UTF-8?Q?Bj=C3=B6rn_=C3=85str=C3=B6m?= <bjorn@example.test>
+To: Alice Example <alice@example.test>
+Subject: =?UTF-8?B?R3LDvMOfZSDigJMg5pel5pys6KqeIPCfk6w=?=
+Date: Fri, 09 Oct 2026 16:45:00 +0200
+Message-ID: <alice-05@fixture.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+Unicode body: Grüße, 日本語, emoji 📬, RTL שלום.

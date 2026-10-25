@@ -1,0 +1,9 @@
+From: Alice Example <alice@example.test>
+To: Dave Example <dave@example.test>
+Subject: Sent earlier
+Date: Fri, 02 Oct 2026 07:20:00 +0000
+Message-ID: <alice-09@fixture.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Already sent message (seeded, never actually sent).

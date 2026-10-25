@@ -1,0 +1,12 @@
+From: <alice@example.test>
+To: <bob@example.test>
+Cc: <carol@example.test>
+Bcc: <dave@example.test>
+Subject: Hi there
+Message-ID: <18e13316894446c5.9b4b6375ef4a157a.b71d6f3c57e1670b@mail-mcp>
+Date: Fri, 23 Oct 2026 15:44:58 +0000
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: base64
+
+SGVsbG8gYm9keQpsaW5lIDIgw7xuw68=

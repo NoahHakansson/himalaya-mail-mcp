@@ -1,0 +1,9 @@
+From: Erin Example <erin@example.test>
+To: Bob Example <bob@example.test>
+Subject: Bob private: seen
+Date: Tue, 06 Oct 2026 11:00:00 +0000
+Message-ID: <bob-02@fixture.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Also only for Bob.

@@ -1,0 +1,4 @@
+Error: Address `not an address` has no email
+
+Suggestions:
+ - Run with --log-level to enable more verbose logs

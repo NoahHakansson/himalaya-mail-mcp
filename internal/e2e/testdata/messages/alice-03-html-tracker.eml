@@ -1,0 +1,28 @@
+From: Newsletter <news@example.test>
+To: Alice Example <alice@example.test>
+Subject: Newsletter with a remote tracking pixel
+Date: Wed, 07 Oct 2026 08:30:00 +0000
+Message-ID: <alice-03@fixture.test>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="alt-boundary-03"
+
+--alt-boundary-03
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+Plain alternative of the newsletter. Read online: https://news.invalid/read?u=alice
+
+--alt-boundary-03
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+<!DOCTYPE html>
+<html><body>
+<p>HTML newsletter body.</p>
+<img src="https://tracker.invalid/pixel.gif?u=alice&amp;m=alice-03" width="1" height="1" alt="">
+<img src="http://tracker.invalid/beacon?id=alice-03" style="display:none">
+<a href="https://phish.invalid/login">Click here to verify your account</a>
+<script>fetch('https://tracker.invalid/js?u=alice')</script>
+</body></html>
+
+--alt-boundary-03--
