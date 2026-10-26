@@ -11,8 +11,9 @@ import (
 
 // Message references and stale-reference safety (DESIGN section 3). A
 // reference is {account, mailbox, uidvalidity, uid}; every tool that takes
-// one checks it against imap status first, and mutations also check that
-// every UID exists and recheck UIDVALIDITY afterwards.
+// one checks it against imap status before using it. Mutations also check
+// that every UID exists, run that status check last before each mutating
+// command, and recheck UIDVALIDITY afterwards.
 
 func (s *Server) status(ctx context.Context, a *account, mb string) (himalaya.Status, error) {
 	out, err := s.run.Run(ctx, a.hx.Status(mb))
@@ -126,16 +127,21 @@ func (s *Server) readRef(ctx context.Context, a *account, mb string, uidvalidity
 	return s.checkSize(ctx, a, mb, uid)
 }
 
-// mutateRef prepares a mutation: the capability gate, checkRef and fetch.
+// mutateRef prepares a mutation: the capability gate, fetch, then checkRef,
+// so that the UIDVALIDITY check is the last command before the mutation.
+// UIDs the fetch missed because of a reset still read stale_reference.
 func (s *Server) mutateRef(ctx context.Context, a *account, mb string, uidvalidity uint32, uids []uint32) error {
 	if err := s.requireCapable(ctx, a); err != nil {
 		return err
 	}
+	_, ferr := s.fetch(ctx, a, mb, uids)
+	if ferr != nil && himalaya.CodeOf(ferr) != himalaya.CodeNotFound {
+		return ferr
+	}
 	if _, err := s.checkRef(ctx, a, mb, uidvalidity, uids); err != nil {
 		return err
 	}
-	_, err := s.fetch(ctx, a, mb, uids)
-	return err
+	return ferr
 }
 
 // postCheck reruns status after a mutation. A changed UIDVALIDITY, or a

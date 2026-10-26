@@ -213,13 +213,13 @@ go test -race -tags integration -count=1 ./internal/e2e/
 HMCP_HIMALAYA=.cache/dl-v2.2.1/extract/himalaya go test -race -tags integration -count=1 ./internal/e2e/
 ```
 
-The integration suite needs Docker and takes about 70 s. By default it uses `.cache/himalaya-imap-only/himalaya`; the last line runs it against the official asset. It builds the real server with `-race` and drives it with the Go MCP SDK client over stdio and HTTP, against disposable Dovecot containers (`hmcp-it-*`, bound to 127.0.0.1, removed afterwards) seeded with synthetic messages. A shim records every Himalaya run, and TestMain checks each argv against the runner guard and each environment against the fixed set. The 15 tests, listed in DESIGN section 11, prove:
+The integration suite needs Docker and takes about 70 s. By default it uses `.cache/himalaya-imap-only/himalaya`; the last line runs it against the official asset. It builds the real server with `-race` and drives it with the Go MCP SDK client over stdio and HTTP, against disposable Dovecot containers (`hmcp-it-*`, bound to 127.0.0.1, removed afterwards) seeded with synthetic messages. A shim records every Himalaya run, and TestMain checks each argv against the runner guard and each environment against the fixed set. The 16 tests, listed in DESIGN section 11, prove:
 
 - the exact tool list, hints and closed schemas, and that unknown tools or extra arguments never reach Himalaya
 - reads that change no flags, paging, search escaping, Unicode folders, exact mailbox names, HTML stripping and account isolation
 - certificate pinning and CA validation over TLS and STARTTLS, with no password in any failure
 - attachment confinement and size limits, and drafts saved only to Drafts with `\Draft \Seen`
-- moves, trash, restore, flags and labels that touch only the named messages and never expunge stray `\Deleted` ones; stale and missing references, including a UIDVALIDITY reset just before a mutation
+- moves, trash, restore, flags and labels that touch only the named messages and never expunge stray `\Deleted` ones; stale and missing references, including a UIDVALIDITY reset just before a mutation, during its existence fetch and during a download; and writes that took effect but then failed, which give `outcome_uncertain` with the mail in the state the error describes
 - adversarial inputs that never become extra argv; live probes inside `docker run --network none` of `message send` and `--send` on compose, add, reply and forward, which fail closed; startup refusals before any IMAP traffic (hash, config, secret and path refusals also before any change on disk or Himalaya run; the feature-set refusal comes after state_dir is prepared and `--version` has run); timeouts and cancellation with no leaked processes; and the HTTP front door
 - that `smtp` and `sieve` are unrecognized subcommands in the IMAP-only build. `smtp`, `sieve`, `jmap`, `gmail`, `msgraph` and `pimdir` are excluded structurally rather than probed live: the runner allowlist never builds them and the IMAP-only build leaves their code out
 

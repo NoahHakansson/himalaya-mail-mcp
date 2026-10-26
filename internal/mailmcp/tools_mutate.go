@@ -91,9 +91,10 @@ func (s *Server) updateFlags(ctx context.Context, in FlagsIn) (FlagsOut, error) 
 			return FlagsOut{}, withSteps(err, done)
 		}
 		done = append(done, fmt.Sprintf("%s %s", verb, flagList(step.flags)))
-	}
-	if err := s.postCheck(ctx, a, mb, uv, "flags "+strings.Join(done, " and ")); err != nil {
-		return FlagsOut{}, err
+		// After each step, so a reset during the first stops the second.
+		if err := s.postCheck(ctx, a, mb, uv, "flags "+strings.Join(done, " and ")); err != nil {
+			return FlagsOut{}, err
+		}
 	}
 	return FlagsOut{Updated: len(uids)}, nil
 }
