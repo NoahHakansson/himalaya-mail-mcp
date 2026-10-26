@@ -10,7 +10,7 @@ Bridge handles Proton login, encryption and sync. The wrapper reaches it only th
 
 ## Tools
 
-Every tool except list_accounts takes `account`. A message reference is `{account, mailbox, uidvalidity, uid}` as list_messages, search_messages or a draft tool returned it; a UID is valid only with its own mailbox and uidvalidity. R is read-only, W adds state, D removes state (a flag, a location or a label).
+Every tool except list_accounts takes `account`. A message reference is `{account, mailbox, uidvalidity, uid}` as list_messages, search_messages or a draft tool returned it. A uid is a string such as `5.k3J9aQxkPq0`: the IMAP UID and a tag that ties it to its account, mailbox and uidvalidity in this server process. Pass it back whole; a uid from another mailbox, or from before a restart, is refused as `stale_reference`. R is read-only, W adds state, D removes state (a flag, a location or a label).
 
 | tool | what it does | hint |
 |---|---|---|
@@ -51,7 +51,7 @@ Tool hints let a client ask for approval before non-read-only tools. None of the
 ## Install
 
 ```sh
-go install github.com/NoahHakansson/himalaya-mail-mcp/cmd/himalaya-mail-mcp@v0.1.0
+go install github.com/NoahHakansson/himalaya-mail-mcp/cmd/himalaya-mail-mcp@v0.2.0
 ```
 
 This installs only the wrapper, into `$(go env GOBIN)` or `$(go env GOPATH)/bin`. It needs Go 1.26 or newer and runs on Linux.
@@ -59,7 +59,7 @@ This installs only the wrapper, into `$(go env GOBIN)` or `$(go env GOPATH)/bin`
 Himalaya is a separate dependency that `go install` does not provide. The wrapper runs only Himalaya v2.2.1 (rev `5b12b2a8`), refuses any other binary, and by default accepts only the IMAP-only build described below, so build it from a checkout of the same tag:
 
 ```sh
-git clone --branch v0.1.0 https://github.com/NoahHakansson/himalaya-mail-mcp.git
+git clone --branch v0.2.0 https://github.com/NoahHakansson/himalaya-mail-mcp.git
 cd himalaya-mail-mcp
 scripts/build-himalaya-imap-only.sh .cache/himalaya-imap-only
 ```
@@ -119,7 +119,7 @@ Defaults and rules:
 - `call_timeout_seconds` is 25 (1..280), one deadline shared by every Himalaya step of a call, so calls finish inside a typical 30 s client timeout.
 - `limits.max_message_bytes` (25 MiB) stops larger messages from being fetched at all. `limits.max_attachment_bytes` (25 MiB) bounds each download and the attachments of each draft.
 - `http.listen` defaults to `127.0.0.1:8765`. A non-loopback address requires `allowed_hosts` and TLS (`tls_cert_file`, `tls_key_file`). `allowed_hosts` defaults to the bound address and is matched exactly.
-- `mailboxes` defaults to Bridge's names (`INBOX`, `Drafts`, `Sent`, `Trash`, `Archive`, `Spam` for inbox, drafts, sent, trash, archive, junk). `protected_mailboxes` defaults to the four listed above.
+- `mailboxes` defaults to Bridge's names (`INBOX`, `Drafts`, `Sent`, `Trash`, `Archive`, `Spam` for inbox, drafts, sent, trash, archive, junk). Any spelling of `inbox` in a role becomes `INBOX`. `protected_mailboxes` defaults to the four listed above.
 - An empty `label_prefix` disables the label tools. Set `Labels/` only for Bridge, where expunging from a label mailbox removes just the label.
 - `security` is `tls` or `starttls`; there is no cleartext mode. Bridge uses STARTTLS on the first free port from 1143, so read the port from Bridge's `info`.
 - Account names match `^[a-z][a-z0-9-]{0,31}$`, and `default` is refused.
@@ -180,7 +180,7 @@ himalaya-mail-mcp -config /etc/himalaya-mail-mcp/config.json http    # Streamabl
 ## Recovery
 
 - `outcome_uncertain`: a mutating step failed after its command may have reached the server, or UIDVALIDITY could not be confirmed afterwards. A call that ended without a result, such as a client timeout, is the same case, and it can keep running on the server until `call_timeout_seconds` after it started, so wait that long before concluding a draft was not saved. List the mailboxes named in the error before acting again; for drafts the error carries the composed `message_id`, which list_messages on Drafts shows. Retrying a draft tool saves another draft. Flags, moves and remove_label are safe to retry: UIDs that already left the mailbox make the call fail with `not_found` and nothing changes.
-- `partial`: only some UIDs moved or were labeled; the detail has the count. `stale_reference`: a Bridge resync changed UIDVALIDITY, or the reference came from another mailbox; list again.
+- `partial`: only some UIDs moved or were labeled; the detail has the count. `stale_reference`: a Bridge resync changed UIDVALIDITY, the reference came from another mailbox, or the server restarted; list again.
 - Restore from Trash with list_messages on the trash mailbox, then restore_messages with `to`. The original folder is not recorded.
 - update_draft with `previous_trashed` `no` or `uncertain` saved the new draft, but the old one may still be in Drafts; `error` says why. List Drafts and trash the old UID. If the new version failed, the error says the previous draft was left in place.
 - Token rotation: write the new token to `token_file`, restart `http`, then update the client. Calls get 401 in between.

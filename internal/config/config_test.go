@@ -44,6 +44,21 @@ func TestParseDefaults(t *testing.T) {
 	}
 }
 
+// Every role, not only the inbox one, uses the spelling mailbox inputs get,
+// so references the wrapper signs with a role name match the ones it lists.
+func TestParseNormalizesRoleNames(t *testing.T) {
+	m := base()
+	account(m)["mailboxes"] = map[string]any{"inbox": "Folders/Projects", "drafts": "inbox"}
+	raw, _ := json.Marshal(m)
+	c, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mb := c.Accounts["proton"].Mailboxes; mb.Inbox != "Folders/Projects" || mb.Drafts != "INBOX" {
+		t.Errorf("mailboxes %+v, want inbox Folders/Projects and drafts INBOX", mb)
+	}
+}
+
 func TestParseRefusals(t *testing.T) {
 	tests := []struct {
 		name string

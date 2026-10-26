@@ -47,9 +47,24 @@ func TestAdversarialInputs(t *testing.T) {
 	files := WriteServerConfig(t, ServerOptions{Fixture: f, Shim: shim})
 	cs := StartStdio(t, BuildServer(t), files)
 
-	inbox := f.Status(t, Alice, "INBOX").UIDValidity
-	ref := map[string]any{"account": "alice", "mailbox": "INBOX", "uidvalidity": inbox, "uid": 1}
-	batch := map[string]any{"account": "alice", "mailbox": "INBOX", "uidvalidity": inbox, "uids": []any{1}}
+	// listed returns the uidvalidity and the first tagged uid of mailbox, as list_messages gives them.
+	listed := func(mailbox string) (uint32, string) {
+		var out struct {
+			UIDValidity uint32
+			Messages    []struct{ UID string }
+		}
+		bdOK(t, bdCall(t, cs, "list_messages", map[string]any{"account": "alice", "mailbox": mailbox}), &out)
+		if len(out.Messages) == 0 {
+			t.Fatalf("%s is empty", mailbox)
+		}
+		return out.UIDValidity, out.Messages[0].UID
+	}
+	inbox, inboxUID := listed("INBOX")
+	trash, trashUID := listed("Trash")
+	work, workUID := listed("Labels/Work")
+	drafts, draftUID := listed("Drafts")
+	ref := map[string]any{"account": "alice", "mailbox": "INBOX", "uidvalidity": inbox, "uid": inboxUID}
+	batch := map[string]any{"account": "alice", "mailbox": "INBOX", "uidvalidity": inbox, "uids": []any{inboxUID}}
 	with := func(base map[string]any, kv ...any) map[string]any {
 		m := maps.Clone(base)
 		for i := 0; i < len(kv); i += 2 {
@@ -74,14 +89,14 @@ func TestAdversarialInputs(t *testing.T) {
 		{name: "move_messages", base: with(batch, "to", "Archive"), mailboxes: []string{"mailbox", "to"}},
 		{name: "archive_messages", base: batch, mailboxes: []string{"mailbox"}},
 		{name: "trash_messages", base: batch, mailboxes: []string{"mailbox"}},
-		{name: "restore_messages", base: map[string]any{"account": "alice", "uidvalidity": f.Status(t, Alice, "Trash").UIDValidity, "uids": []any{1}, "to": "INBOX"},
+		{name: "restore_messages", base: map[string]any{"account": "alice", "uidvalidity": trash, "uids": []any{trashUID}, "to": "INBOX"},
 			mailboxes: []string{"to"}},
 		{name: "add_label", base: with(batch, "label", "Labels/Work"), mailboxes: []string{"mailbox", "label"}},
-		{name: "remove_label", base: map[string]any{"account": "alice", "label": "Labels/Work", "uidvalidity": f.Status(t, Alice, "Labels/Work").UIDValidity, "uids": []any{1}},
+		{name: "remove_label", base: map[string]any{"account": "alice", "label": "Labels/Work", "uidvalidity": work, "uids": []any{workUID}},
 			mailboxes: []string{"label"}},
 		{name: "create_draft", base: map[string]any{"account": "alice", "to": []any{"carol@example.test"}, "subject": "x"},
 			addresses: []string{"to", "cc", "bcc"}, files: []string{"attachments"}},
-		{name: "update_draft", base: map[string]any{"account": "alice", "uidvalidity": f.Status(t, Alice, "Drafts").UIDValidity, "uid": 1, "subject": "x"},
+		{name: "update_draft", base: map[string]any{"account": "alice", "uidvalidity": drafts, "uid": draftUID, "subject": "x"},
 			addresses: []string{"to", "cc", "bcc"}, files: []string{"attachments"}},
 		{name: "reply_draft", base: with(ref, "body", "x"), mailboxes: []string{"mailbox"}, addresses: []string{"to", "cc"}, files: []string{"attachments"}},
 		{name: "forward_draft", base: with(ref, "to", []any{"carol@example.test"}), mailboxes: []string{"mailbox"}, addresses: []string{"to", "cc"}, files: []string{"attachments"}},
@@ -129,6 +144,9 @@ func TestAdversarialInputs(t *testing.T) {
 	draft := map[string]any{"account": "alice", "to": []any{"carol@example.test"}}
 	reject("read_message", "uid", with(ref, "uid", "1,2"))
 	reject("update_flags", "uids", with(batch, "seen", true, "uids", []any{"1,2"}))
+	// A bare number, without the tag that ties it to its mailbox.
+	reject("read_message", "uid", with(ref, "uid", 1))
+	reject("update_flags", "uids", with(batch, "seen", true, "uids", []any{1}))
 	// Over-long values: the schema counts code points, the handlers also count bytes.
 	reject("create_draft", "subject", with(draft, "subject", strings.Repeat("a", 256)))
 	rejectInHandler("create_draft", "subject", with(draft, "subject", strings.Repeat("𝄞", 255)))
@@ -191,11 +209,11 @@ func TestAdversarialInputs(t *testing.T) {
 	}
 	for _, s := range searches {
 		before := len(shim.Records(t))
-		var out struct{ Messages []struct{ UID uint32 } }
+		var out struct{ Messages []struct{ UID string } }
 		bdOK(t, bdCall(t, cs, "search_messages", bdMerge(map[string]any{"account": "alice", "mailbox": "INBOX"}, s.args)), &out)
 		got := []uint32{}
 		for _, m := range out.Messages {
-			got = append(got, m.UID)
+			got = append(got, uidNumber(t, m.UID))
 		}
 		if !slices.Equal(got, s.want) {
 			t.Errorf("search %v found UIDs %v, want %v", s.args, got, s.want)
@@ -211,16 +229,16 @@ func TestAdversarialInputs(t *testing.T) {
 	for _, v := range bdOptionValues {
 		before := len(shim.Records(t))
 		body := "$(id)\n" + v + "\n"
-		var d struct{ UID uint32 }
+		var d struct{ UID string }
 		bdOK(t, bdCall(t, cs, "create_draft", with(draft, "subject", v, "body", body)), &d)
 		r := bdRecord(t, shim.Records(t)[before:], "message compose")
 		// After the fixed global prefix, which carries -a itself.
 		if args := r.Argv[8:]; !slices.Contains(args, "--subject="+v) || slices.Contains(args, v) {
 			t.Errorf("subject %q: compose ran %q, want it only inside --subject=", v, r.Argv)
 		}
-		raw := string(f.RawMessage(t, Alice, "Drafts", d.UID))
+		raw := string(f.RawMessage(t, Alice, "Drafts", uidNumber(t, d.UID)))
 		if !regexp.MustCompile(`(?m)^Subject: `+regexp.QuoteMeta(v)+"\r?$").MatchString(raw) || !strings.Contains(raw, "$(id)") {
-			t.Errorf("draft %d for subject %q is not literal:\n%s", d.UID, v, raw)
+			t.Errorf("draft %s for subject %q is not literal:\n%s", d.UID, v, raw)
 		}
 	}
 	for _, r := range shim.Records(t) {
@@ -604,7 +622,12 @@ func TestFailuresAndCancellation(t *testing.T) {
 		}
 		shim.SetHook(t, []string{"flag", "add"}, []string{"/bin/cat", fifo})
 		flagsBefore := f.Flags(t, Alice, "INBOX")
-		args := map[string]any{"account": "alice", "mailbox": "INBOX", "uidvalidity": f.Status(t, Alice, "INBOX").UIDValidity, "uids": []any{1}, "seen": true}
+		var list struct {
+			UIDValidity uint32
+			Messages    []struct{ UID string }
+		}
+		bdOK(t, bdCall(t, cs, "list_messages", map[string]any{"account": "alice", "mailbox": "INBOX"}), &list)
+		args := map[string]any{"account": "alice", "mailbox": "INBOX", "uidvalidity": list.UIDValidity, "uids": []any{list.Messages[0].UID}, "seen": true}
 		before := bdToolClasses(t, files, "update_flags")
 		bdCancelMidCall(t, cs, "update_flags", args, fifo)
 		AssertNoProcs(t, hookDir)
@@ -742,14 +765,18 @@ func TestHTTP(t *testing.T) {
 		}
 		var list struct {
 			UIDValidity uint32
-			Messages    []struct{ UID uint32 }
+			Messages    []struct{ UID string }
 		}
 		bdOK(t, bdCall(t, s.cs, "list_messages", map[string]any{"account": "alice", "mailbox": "INBOX"}), &list)
 		if list.UIDValidity != uv || len(list.Messages) != 6 {
 			t.Errorf("%s list_messages: uidvalidity %d and %d messages, want %d and 6", s.version, list.UIDValidity, len(list.Messages), uv)
 		}
+		i := slices.IndexFunc(list.Messages, func(m struct{ UID string }) bool { return uidNumber(t, m.UID) == s.uid })
+		if i < 0 {
+			t.Fatalf("%s list_messages has no uid %d", s.version, s.uid)
+		}
 		var upd struct{ Updated int }
-		bdOK(t, bdCall(t, s.cs, "update_flags", bdMerge(map[string]any{"account": "alice", "mailbox": "INBOX", "uidvalidity": uv, "uids": []any{s.uid}}, s.args)), &upd)
+		bdOK(t, bdCall(t, s.cs, "update_flags", bdMerge(map[string]any{"account": "alice", "mailbox": "INBOX", "uidvalidity": uv, "uids": []any{list.Messages[i].UID}}, s.args)), &upd)
 		if upd.Updated != 1 {
 			t.Errorf("%s update_flags updated %d, want 1", s.version, upd.Updated)
 		}

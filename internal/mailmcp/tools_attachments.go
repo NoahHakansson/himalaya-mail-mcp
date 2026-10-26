@@ -28,7 +28,7 @@ type ListAttachmentsOut struct {
 	Account     string           `json:"account"`
 	Mailbox     string           `json:"mailbox"`
 	UIDValidity uint32           `json:"uidvalidity"`
-	UID         uint32           `json:"uid"`
+	UID         UID              `json:"uid"`
 	Attachments []AttachmentInfo `json:"attachments"`
 }
 
@@ -48,7 +48,7 @@ func (s *Server) listAttachments(ctx context.Context, in RefIn) (ListAttachments
 	if err != nil {
 		return ListAttachmentsOut{}, mailError()
 	}
-	out := ListAttachmentsOut{Account: a.cfg.Name, Mailbox: mb, UIDValidity: uv, UID: uid, Attachments: []AttachmentInfo{}}
+	out := ListAttachmentsOut{Account: a.cfg.Name, Mailbox: mb, UIDValidity: uv, UID: s.tagUID(a.cfg.Name, mb, uv, uid), Attachments: []AttachmentInfo{}}
 	for _, at := range atts {
 		if at.Inline {
 			continue

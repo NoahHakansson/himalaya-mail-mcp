@@ -18,7 +18,7 @@ type AddressOut struct {
 
 // Summary is one row of list_messages or search_messages.
 type Summary struct {
-	UID           uint32       `json:"uid"`
+	UID           UID          `json:"uid"`
 	MessageID     string       `json:"message_id"`
 	Date          string       `json:"date"`
 	From          []AddressOut `json:"from"`
@@ -39,7 +39,8 @@ func addressesOut(in []himalaya.Address) []AddressOut {
 	return out
 }
 
-func summaries(envs []himalaya.Envelope) []Summary {
+// summaries converts envelopes of mailbox mb at UIDVALIDITY uv.
+func (s *Server) summaries(account, mb string, uv uint32, envs []himalaya.Envelope) []Summary {
 	out := make([]Summary, 0, len(envs))
 	for _, e := range envs {
 		flags := []string{}
@@ -49,7 +50,7 @@ func summaries(envs []himalaya.Envelope) []Summary {
 			}
 		}
 		out = append(out, Summary{
-			UID: e.UID, MessageID: sanitizeLine(e.MessageID), Date: sanitizeLine(e.Date),
+			UID: s.tagUID(account, mb, uv, e.UID), MessageID: sanitizeLine(e.MessageID), Date: sanitizeLine(e.Date),
 			From: addressesOut(e.From), To: addressesOut(e.To), Subject: sanitizeLine(e.Subject),
 			Flags: flags, HasAttachment: e.HasAttachment, Size: e.Size,
 		})
@@ -207,7 +208,7 @@ func (s *Server) listMessages(ctx context.Context, in ListMessagesIn) (ListMessa
 	}
 	return ListMessagesOut{
 		Account: a.cfg.Name, Mailbox: mb, UIDValidity: st.UIDValidity, Total: st.Messages, Unseen: st.Unseen,
-		Page: page, PageSize: size, Messages: summaries(envs),
+		Page: page, PageSize: size, Messages: s.summaries(a.cfg.Name, mb, st.UIDValidity, envs),
 	}, nil
 }
 
@@ -299,7 +300,7 @@ func (s *Server) searchMessages(ctx context.Context, in SearchIn) (SearchOut, er
 	}
 	return SearchOut{
 		Account: a.cfg.Name, Mailbox: mb, UIDValidity: st.UIDValidity,
-		Page: page, PageSize: size, Messages: summaries(envs),
+		Page: page, PageSize: size, Messages: s.summaries(a.cfg.Name, mb, st.UIDValidity, envs),
 	}, nil
 }
 
@@ -319,7 +320,7 @@ type ReadOut struct {
 	Account     string       `json:"account"`
 	Mailbox     string       `json:"mailbox"`
 	UIDValidity uint32       `json:"uidvalidity"`
-	UID         uint32       `json:"uid"`
+	UID         UID          `json:"uid"`
 	MessageID   string       `json:"message_id"`
 	Date        string       `json:"date"`
 	From        []AddressOut `json:"from"`
@@ -346,7 +347,7 @@ func (s *Server) refIn(acct Account, mailbox Mailbox, v UIDValidity, u UID) (*ac
 	if err != nil {
 		return nil, "", 0, 0, err
 	}
-	uid, err := checkUID(u)
+	uid, err := s.checkUID("uid", a.cfg.Name, mb, uv, u)
 	if err != nil {
 		return nil, "", 0, 0, err
 	}
@@ -374,7 +375,7 @@ func (s *Server) readMessage(ctx context.Context, in ReadIn) (ReadOut, error) {
 		return ReadOut{}, mailError()
 	}
 	out := ReadOut{
-		Account: a.cfg.Name, Mailbox: mb, UIDValidity: uv, UID: uid,
+		Account: a.cfg.Name, Mailbox: mb, UIDValidity: uv, UID: s.tagUID(a.cfg.Name, mb, uv, uid),
 		MessageID: sanitizeLine(m.MessageID), Date: m.Date, Subject: sanitizeLine(m.Subject),
 		From: addressesOut(m.From), To: addressesOut(m.To), Cc: addressesOut(m.Cc), ReplyTo: addressesOut(m.ReplyTo),
 		BodyFormat: "none",

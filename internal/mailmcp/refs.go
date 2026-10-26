@@ -2,8 +2,12 @@ package mailmcp
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/NoahHakansson/himalaya-mail-mcp/internal/himalaya"
@@ -14,6 +18,86 @@ import (
 // one checks it against imap status before using it. Mutations also check
 // that every UID exists, run that status check last before each mutating
 // command, and recheck UIDVALIDITY afterwards.
+
+// Tagged UIDs. Every UID the wrapper returns reads "<uid>.<tag>", where tag
+// is an HMAC over the account, mailbox, UIDVALIDITY and UID under a key that
+// lives as long as the process. A UID copied to another mailbox, another
+// UIDVALIDITY or another account, or kept across a restart, fails checkUID
+// before any IMAP command runs. Himalaya only ever sees the number.
+
+const (
+	tagLen      = 11 // base64url of 8 bytes, without padding
+	tagAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+)
+
+// tagUID returns uid as clients see it.
+func (s *Server) tagUID(account, mb string, uv, uid uint32) UID {
+	return UID(strconv.FormatUint(uint64(uid), 10) + "." + s.tag(account, mb, uv, uid))
+}
+
+func (s *Server) tag(account, mb string, uv, uid uint32) string {
+	h := hmac.New(sha256.New, s.key)
+	fmt.Fprintf(h, "v1\x00%s\x00%s\x00%d\x00%d", account, mb, uv, uid)
+	return base64.RawURLEncoding.EncodeToString(h.Sum(nil)[:8])
+}
+
+// parseUID splits a tagged uid into a canonical decimal UID in 1..MaxUID
+// and an 11-character base64url tag, or reports that u is malformed.
+func parseUID(u UID) (uint32, string, bool) {
+	num, tag, _ := strings.Cut(string(u), ".")
+	n, err := strconv.ParseUint(num, 10, 32)
+	ok := err == nil && num[0] != '0' && n <= himalaya.MaxUID && len(tag) == tagLen &&
+		!strings.ContainsFunc(tag, func(r rune) bool { return !strings.ContainsRune(tagAlphabet, r) })
+	return uint32(n), tag, ok
+}
+
+// verifyTag requires tag to be the one tagUID gives uid in mailbox mb of
+// account at UIDVALIDITY uv, else stale_reference. It compares text and
+// never decodes the tag, because the base64 decoder accepts more than one
+// spelling of the same bytes.
+func (s *Server) verifyTag(account, mb string, uv, uid uint32, tag string) error {
+	if !hmac.Equal([]byte(tag), []byte(s.tag(account, mb, uv, uid))) {
+		return himalaya.Errorf(himalaya.CodeStaleReference, fmt.Sprintf("uid %d was not listed in mailbox %q at uidvalidity %d", uid, mb, uv))
+	}
+	return nil
+}
+
+// checkUID returns the UID that u tags in mailbox mb of account at
+// UIDVALIDITY uv. A malformed u is invalid_argument; a tag for anything
+// else is stale_reference.
+func (s *Server) checkUID(field, account, mb string, uv uint32, u UID) (uint32, error) {
+	n, tag, ok := parseUID(u)
+	if !ok {
+		return 0, invalid(field, "must be copied exactly from a tool result")
+	}
+	return n, s.verifyTag(account, mb, uv, n, tag)
+}
+
+// checkUIDs is checkUID for a batch of 1..50 distinct UIDs. Form and
+// uniqueness come first, so the same UID under two spellings is a duplicate.
+func (s *Server) checkUIDs(account, mb string, uv uint32, us UIDs) ([]uint32, error) {
+	if len(us) < 1 || len(us) > maxUIDs {
+		return nil, invalid("uids", fmt.Sprintf("must hold 1..%d UIDs", maxUIDs))
+	}
+	nums := make([]uint32, len(us))
+	tags := make([]string, len(us))
+	for i, u := range us {
+		n, tag, ok := parseUID(u)
+		if !ok {
+			return nil, invalid("uids", "must be copied exactly from a tool result")
+		}
+		if slices.Contains(nums[:i], n) {
+			return nil, invalid("uids", "must be unique")
+		}
+		nums[i], tags[i] = n, tag
+	}
+	for i, n := range nums {
+		if err := s.verifyTag(account, mb, uv, n, tags[i]); err != nil {
+			return nil, err
+		}
+	}
+	return nums, nil
+}
 
 func (s *Server) status(ctx context.Context, a *account, mb string) (himalaya.Status, error) {
 	out, err := s.run.Run(ctx, a.hx.Status(mb))

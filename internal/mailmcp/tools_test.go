@@ -81,6 +81,15 @@ func newTestServer(t *testing.T, answers map[string][]answer) (*Server, *fakeRun
 	return New(context.Background(), cfg, f, map[string]*os.Root{"proton": files}, nil, log), f
 }
 
+// tagged returns UIDs of account proton's mailbox mb at UIDVALIDITY uv as s returns them.
+func tagged(s *Server, mb string, uv uint32, nums ...uint32) UIDs {
+	out := make(UIDs, len(nums))
+	for i, n := range nums {
+		out[i] = s.tagUID("proton", mb, uv, n)
+	}
+	return out
+}
+
 func wantCode(t *testing.T, err error, code himalaya.Code, detail string) {
 	t.Helper()
 	if himalaya.CodeOf(err) != code || !strings.Contains(err.Error(), detail) {
@@ -95,7 +104,9 @@ func wantCalls(t *testing.T, f *fakeRunner, want ...string) {
 	}
 }
 
-var moveIn = MoveIn{Account: "proton", Mailbox: "inbox", UIDValidity: 77, UIDs: UIDs{1, 2}, To: "Archive"}
+func moveIn(s *Server) MoveIn {
+	return MoveIn{Account: "proton", Mailbox: "inbox", UIDValidity: 77, UIDs: tagged(s, "INBOX", 77, 1, 2), To: "Archive"}
+}
 
 func TestMoveFlow(t *testing.T) {
 	tests := []struct {
@@ -143,7 +154,7 @@ func TestMoveFlow(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s, f := newTestServer(t, tt.answers)
-			out, err := s.moveMessages(context.Background(), moveIn)
+			out, err := s.moveMessages(context.Background(), moveIn(s))
 			if tt.code == "" {
 				if err != nil || out.Moved != 2 || out.From != "INBOX" || out.To != "Archive" {
 					t.Fatalf("%+v %v", out, err)
@@ -183,7 +194,7 @@ func TestUpdateFlagsSteps(t *testing.T) {
 				"flag add": {added}, "flag remove": tt.remove,
 			})
 			_, err := s.updateFlags(context.Background(), FlagsIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 77,
-				UIDs: UIDs{1, 2}, Seen: new(true), Flagged: new(false)})
+				UIDs: tagged(s, "INBOX", 77, 1, 2), Seen: new(true), Flagged: new(false)})
 			wantCode(t, err, himalaya.CodeOutcomeUncertain, tt.detail)
 			wantCalls(t, f, tt.calls...)
 		})
@@ -212,9 +223,9 @@ func TestUpdateDraftTrashStep(t *testing.T) {
 				"message compose": {{out: composed}}, "message add": {{out: `{"id":"12","sent":false}`}},
 				"message move": {tt.move},
 			})
-			out, err := s.updateDraft(context.Background(), UpdateDraftIn{Account: "proton", UIDValidity: 77, UID: 1,
+			out, err := s.updateDraft(context.Background(), UpdateDraftIn{Account: "proton", UIDValidity: 77, UID: s.tagUID("proton", "Drafts", 77, 1),
 				To: Addresses{"bob@example.test"}, Subject: "s", Body: "body"})
-			if err != nil || out.UID != 12 || out.UIDValidity != 77 || out.Mailbox != "Drafts" || out.MessageID != "abc.123@mail-mcp" ||
+			if err != nil || out.UID != s.tagUID("proton", "Drafts", 77, 12) || out.UIDValidity != 77 || out.Mailbox != "Drafts" || out.MessageID != "abc.123@mail-mcp" ||
 				out.PreviousTrashed != tt.trashed || !strings.Contains(out.Error, tt.errorHas) {
 				t.Fatalf("%+v %v", out, err)
 			}
@@ -257,7 +268,7 @@ func TestDraftAddUncertainNamesMessageID(t *testing.T) {
 				"imap raw": {{out: capsOK}}, "imap status": {{out: statusOK}}, "imap fetch": {{out: fetch1}},
 				"message compose": {{out: composed}}, "message add": {tt.add},
 			})
-			_, err := s.updateDraft(context.Background(), UpdateDraftIn{Account: "proton", UIDValidity: 77, UID: 1, Subject: "s"})
+			_, err := s.updateDraft(context.Background(), UpdateDraftIn{Account: "proton", UIDValidity: 77, UID: s.tagUID("proton", "Drafts", 77, 1), Subject: "s"})
 			wantCode(t, err, himalaya.CodeOutcomeUncertain, look)
 			wantCode(t, err, himalaya.CodeOutcomeUncertain, "the previous draft was left in place")
 			wantCalls(t, f, "imap raw", "imap fetch", "imap status", "message compose", "message add")
@@ -284,7 +295,7 @@ func TestDownloadRechecksBeforeSaving(t *testing.T) {
 		"imap status": {{out: statusOK}, {out: statusChanged}}, "imap fetch": {{out: fetch1}},
 		"attachment download": {{out: `{"attachments":[{"id":"3","filename":"a.txt","mime":"text/plain","size":5,"inline":false}]}`}},
 	})
-	_, err := s.downloadAttachment(context.Background(), DownloadIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 77, UID: 1, PartID: 3})
+	_, err := s.downloadAttachment(context.Background(), DownloadIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 77, UID: s.tagUID("proton", "INBOX", 77, 1), PartID: 3})
 	wantCode(t, err, himalaya.CodeStaleReference, `mailbox "INBOX"`)
 	wantCalls(t, f, "imap status", "imap fetch", "attachment download", "imap status")
 	if names, _ := fs.ReadDir(s.roots["proton"].FS(), "."); len(names) != 0 {
@@ -300,7 +311,7 @@ func TestReadChecksSizeBeforeFetchingTheBody(t *testing.T) {
 		"imap status": {{out: statusOK}},
 		"imap fetch":  {{out: `{"messages":[{"seq":1,"uid":1,"flags":[],"size":1001}]}`}},
 	})
-	_, err := s.readMessage(context.Background(), ReadIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 77, UID: 1})
+	_, err := s.readMessage(context.Background(), ReadIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 77, UID: s.tagUID("proton", "INBOX", 77, 1)})
 	wantCode(t, err, himalaya.CodeTooLarge, "max_message_bytes")
 	wantCalls(t, f, "imap status", "imap fetch")
 }
@@ -323,7 +334,7 @@ func TestCheckSizeUsesTheRequestedUIDsRow(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s, f := newTestServer(t, map[string][]answer{"imap status": {{out: statusOK}}, "imap fetch": {{out: tt.fetch}}})
-			_, err := s.readMessage(context.Background(), ReadIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 77, UID: 4})
+			_, err := s.readMessage(context.Background(), ReadIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 77, UID: s.tagUID("proton", "INBOX", 77, 4)})
 			wantCode(t, err, tt.code, "")
 			wantCalls(t, f, "imap status", "imap fetch")
 		})
@@ -355,10 +366,10 @@ func TestReplyDraftRechecksTheSource(t *testing.T) {
 				"imap status": {{out: statusOK}, {out: statusOK}, tt.recheck},
 				"message add": {tt.add},
 			})
-			out, err := s.replyDraft(context.Background(), ReplyIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 77, UID: 1, Body: "ok"})
+			out, err := s.replyDraft(context.Background(), ReplyIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 77, UID: s.tagUID("proton", "INBOX", 77, 1), Body: "ok"})
 			checks := []string{"imap raw", "imap status", "imap fetch", "imap status", "message reply", "imap status"}
 			if tt.code == "" {
-				if err != nil || out.UID != 12 || out.MessageID != "abc.123@mail-mcp" {
+				if err != nil || out.UID != s.tagUID("proton", "Drafts", 77, 12) || out.MessageID != "abc.123@mail-mcp" {
 					t.Fatalf("%+v %v", out, err)
 				}
 				wantCalls(t, f, append(checks, "message add")...)
@@ -381,7 +392,7 @@ func TestReadMessageSanitizes(t *testing.T) {
 	s, _ := newTestServer(t, map[string][]answer{
 		"imap status": {{out: statusOK}}, "imap fetch": {{out: fetch1}}, "message read": {{out: read}},
 	})
-	out, err := s.readMessage(context.Background(), ReadIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 77, UID: 1, MaxBytes: 1024})
+	out, err := s.readMessage(context.Background(), ReadIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 77, UID: s.tagUID("proton", "INBOX", 77, 1), MaxBytes: 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +407,7 @@ func TestRemoveLabelRequiresDeletedResult(t *testing.T) {
 		"imap raw": {{out: capsOK}}, "imap status": {{out: statusOK}}, "imap fetch": {{out: fetch1}},
 		"message delete": {{out: `{"action":"moved-to-trash","count":1}`}},
 	})
-	_, err := s.removeLabel(context.Background(), RemoveLabelIn{Account: "proton", Label: "Labels/Work", UIDValidity: 77, UIDs: UIDs{1}})
+	_, err := s.removeLabel(context.Background(), RemoveLabelIn{Account: "proton", Label: "Labels/Work", UIDValidity: 77, UIDs: tagged(s, "Labels/Work", 77, 1)})
 	wantCode(t, err, himalaya.CodeOutcomeUncertain, `removing label "Labels/Work"`)
 	wantCalls(t, f, "imap raw", "imap fetch", "imap status", "message delete")
 	if left, _ := os.ReadDir(s.tmpDir()); len(left) != 0 {
@@ -447,49 +458,64 @@ func TestAddressable(t *testing.T) {
 }
 
 // TestHandlersValidate calls handlers directly, as a client that bypasses
-// the schema would: every bad value is refused before any subprocess.
+// the schema would: every bad value is refused before any subprocess. Rows
+// that test a later check pass correctly tagged UIDs.
 func TestHandlersValidate(t *testing.T) {
 	ctx := context.Background()
 	ref := func(mb Mailbox, uid UID) ReadIn {
 		return ReadIn{Account: "proton", Mailbox: mb, UIDValidity: 77, UID: uid}
 	}
+	const anyTag = "AAAAAAAAAAA"
 	tests := []struct {
 		name string
 		call func(s *Server) error
 		code himalaya.Code
 	}{
 		{"unknown account", func(s *Server) error { _, err := s.listMailboxes(ctx, AccountIn{Account: "bob"}); return err }, himalaya.CodeInvalidArgument},
-		{"uid 0", func(s *Server) error { _, err := s.readMessage(ctx, ref("INBOX", 0)); return err }, himalaya.CodeInvalidArgument},
-		{"uid star", func(s *Server) error { _, err := s.readMessage(ctx, ref("INBOX", 4294967295)); return err }, himalaya.CodeInvalidArgument},
-		{"mailbox option", func(s *Server) error { _, err := s.readMessage(ctx, ref("-c/etc/passwd", 1)); return err }, himalaya.CodeInvalidArgument},
-		{"mailbox crlf", func(s *Server) error { _, err := s.readMessage(ctx, ref("a\r\nb", 1)); return err }, himalaya.CodeInvalidArgument},
-		{"mailbox zero-width", func(s *Server) error { _, err := s.readMessage(ctx, ref("Folders/Review\u200b", 1)); return err }, himalaya.CodeInvalidArgument},
+		{"uid without its tag", func(s *Server) error { _, err := s.readMessage(ctx, ref("INBOX", "1")); return err }, himalaya.CodeInvalidArgument},
+		{"uid 0", func(s *Server) error { _, err := s.readMessage(ctx, ref("INBOX", "0."+anyTag)); return err }, himalaya.CodeInvalidArgument},
+		{"uid star", func(s *Server) error { _, err := s.readMessage(ctx, ref("INBOX", "4294967295."+anyTag)); return err }, himalaya.CodeInvalidArgument},
+		{"uid from another mailbox", func(s *Server) error {
+			_, err := s.readMessage(ctx, ref("INBOX", s.tagUID("proton", "Trash", 77, 1)))
+			return err
+		}, himalaya.CodeStaleReference},
+		// The undo-a-trash mistake: the UID the message had before it moved.
+		{"restore with an inbox uid", func(s *Server) error {
+			_, err := s.restoreMessages(ctx, RestoreIn{Account: "proton", UIDValidity: 77, UIDs: tagged(s, "INBOX", 77, 1)})
+			return err
+		}, himalaya.CodeStaleReference},
+		{"mailbox option", func(s *Server) error { _, err := s.readMessage(ctx, ref("-c/etc/passwd", "1."+anyTag)); return err }, himalaya.CodeInvalidArgument},
+		{"mailbox crlf", func(s *Server) error { _, err := s.readMessage(ctx, ref("a\r\nb", "1."+anyTag)); return err }, himalaya.CodeInvalidArgument},
+		{"mailbox zero-width", func(s *Server) error {
+			_, err := s.readMessage(ctx, ref("Folders/Review\u200b", "1."+anyTag))
+			return err
+		}, himalaya.CodeInvalidArgument},
 		{"move target bidi", func(s *Server) error {
-			_, err := s.moveMessages(ctx, MoveIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 1, UIDs: UIDs{1}, To: "Archive\u202e"})
+			_, err := s.moveMessages(ctx, MoveIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 1, UIDs: tagged(s, "INBOX", 1, 1), To: "Archive\u202e"})
 			return err
 		}, himalaya.CodeInvalidArgument},
 		{"label tag character", func(s *Server) error {
-			_, err := s.addLabel(ctx, AddLabelIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 1, UIDs: UIDs{1}, Label: "Labels/Work\U000E0041"})
+			_, err := s.addLabel(ctx, AddLabelIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 1, UIDs: tagged(s, "INBOX", 1, 1), Label: "Labels/Work\U000E0041"})
 			return err
 		}, himalaya.CodeInvalidArgument},
 		{"uidvalidity 0", func(s *Server) error {
-			_, err := s.readMessage(ctx, ReadIn{Account: "proton", Mailbox: "INBOX", UID: 1})
+			_, err := s.readMessage(ctx, ReadIn{Account: "proton", Mailbox: "INBOX", UID: s.tagUID("proton", "INBOX", 1, 1)})
 			return err
 		}, himalaya.CodeInvalidArgument},
 		{"max_bytes too small", func(s *Server) error {
-			_, err := s.readMessage(ctx, ReadIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 1, UID: 1, MaxBytes: 10})
+			_, err := s.readMessage(ctx, ReadIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 1, UID: s.tagUID("proton", "INBOX", 1, 1), MaxBytes: 10})
 			return err
 		}, himalaya.CodeInvalidArgument},
 		{"duplicate uids", func(s *Server) error {
-			_, err := s.trashMessages(ctx, BatchIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 1, UIDs: UIDs{1, 1}})
+			_, err := s.trashMessages(ctx, BatchIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 1, UIDs: tagged(s, "INBOX", 1, 1, 1)})
 			return err
 		}, himalaya.CodeInvalidArgument},
 		{"51 uids", func(s *Server) error {
-			uids := make(UIDs, 51)
-			for i := range uids {
-				uids[i] = UID(i + 1)
+			nums := make([]uint32, 51)
+			for i := range nums {
+				nums[i] = uint32(i + 1)
 			}
-			_, err := s.trashMessages(ctx, BatchIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 1, UIDs: uids})
+			_, err := s.trashMessages(ctx, BatchIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 1, UIDs: tagged(s, "INBOX", 1, nums...)})
 			return err
 		}, himalaya.CodeInvalidArgument},
 		{"display name", func(s *Server) error {
@@ -533,27 +559,27 @@ func TestHandlersValidate(t *testing.T) {
 			return err
 		}, himalaya.CodeInvalidArgument},
 		{"flags without a change", func(s *Server) error {
-			_, err := s.updateFlags(ctx, FlagsIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 1, UIDs: UIDs{1}})
+			_, err := s.updateFlags(ctx, FlagsIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 1, UIDs: tagged(s, "INBOX", 1, 1)})
 			return err
 		}, himalaya.CodeInvalidArgument},
 		{"label outside the prefix", func(s *Server) error {
-			_, err := s.addLabel(ctx, AddLabelIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 1, UIDs: UIDs{1}, Label: "Trash"})
+			_, err := s.addLabel(ctx, AddLabelIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 1, UIDs: tagged(s, "INBOX", 1, 1), Label: "Trash"})
 			return err
 		}, himalaya.CodeForbidden},
 		{"move into a label", func(s *Server) error {
-			_, err := s.moveMessages(ctx, MoveIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 1, UIDs: UIDs{1}, To: "Labels/Work"})
+			_, err := s.moveMessages(ctx, MoveIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 1, UIDs: tagged(s, "INBOX", 1, 1), To: "Labels/Work"})
 			return err
 		}, himalaya.CodeForbidden},
 		{"trash from trash", func(s *Server) error {
-			_, err := s.trashMessages(ctx, BatchIn{Account: "proton", Mailbox: "trash", UIDValidity: 1, UIDs: UIDs{1}})
+			_, err := s.trashMessages(ctx, BatchIn{Account: "proton", Mailbox: "trash", UIDValidity: 1, UIDs: tagged(s, "trash", 1, 1)})
 			return err
 		}, himalaya.CodeForbidden},
 		{"restore into trash", func(s *Server) error {
-			_, err := s.restoreMessages(ctx, RestoreIn{Account: "proton", UIDValidity: 1, UIDs: UIDs{1}, To: "Trash"})
+			_, err := s.restoreMessages(ctx, RestoreIn{Account: "proton", UIDValidity: 1, UIDs: tagged(s, "Trash", 1, 1), To: "Trash"})
 			return err
 		}, himalaya.CodeForbidden},
 		{"part id 0", func(s *Server) error {
-			_, err := s.downloadAttachment(ctx, DownloadIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 1, UID: 1})
+			_, err := s.downloadAttachment(ctx, DownloadIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 1, UID: s.tagUID("proton", "INBOX", 1, 1)})
 			return err
 		}, himalaya.CodeInvalidArgument},
 	}
@@ -564,6 +590,51 @@ func TestHandlersValidate(t *testing.T) {
 			wantCalls(t, f)
 		})
 	}
+}
+
+// A tagged UID works only with the account, mailbox and UIDVALIDITY it was
+// listed with, and only in the process that listed it.
+func TestTaggedUIDs(t *testing.T) {
+	s, _ := newTestServer(t, nil)
+	u := s.tagUID("proton", "INBOX", 77, 5)
+	if n, err := s.checkUID("uid", "proton", "INBOX", 77, u); err != nil || n != 5 {
+		t.Fatalf("round trip of %q: %d %v", u, n, err)
+	}
+	_, tag, _ := strings.Cut(string(u), ".")
+	// The last base64url character carries two padding bits, so flipping the
+	// lowest one keeps the decoded bytes and changes the text.
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	alias := UID("5." + tag[:tagLen-1] + string(alphabet[strings.IndexByte(alphabet, tag[tagLen-1])^1]))
+	other, _ := newTestServer(t, nil)
+	for _, tt := range []struct {
+		name, account, mb string
+		uv                uint32
+		u                 UID
+		code              himalaya.Code
+	}{
+		{"another account", "bob", "INBOX", 77, u, himalaya.CodeStaleReference},
+		{"another mailbox", "proton", "Trash", 77, u, himalaya.CodeStaleReference},
+		{"another uidvalidity", "proton", "INBOX", 78, u, himalaya.CodeStaleReference},
+		{"another uid", "proton", "INBOX", 77, UID("6." + tag), himalaya.CodeStaleReference},
+		{"another process", "proton", "INBOX", 77, other.tagUID("proton", "INBOX", 77, 5), himalaya.CodeStaleReference},
+		{"alias spelling", "proton", "INBOX", 77, alias, himalaya.CodeStaleReference},
+		{"bare number", "proton", "INBOX", 77, "5", himalaya.CodeInvalidArgument},
+		{"empty tag", "proton", "INBOX", 77, "5.", himalaya.CodeInvalidArgument},
+		{"leading zero", "proton", "INBOX", 77, UID("05." + tag), himalaya.CodeInvalidArgument},
+		{"signed", "proton", "INBOX", 77, UID("+5." + tag), himalaya.CodeInvalidArgument},
+		{"past MaxUID", "proton", "INBOX", 77, UID("4294967295." + tag), himalaya.CodeInvalidArgument},
+		{"long tag", "proton", "INBOX", 77, u + "A", himalaya.CodeInvalidArgument},
+		{"not base64url", "proton", "INBOX", 77, "5.!!!!!!!!!!!", himalaya.CodeInvalidArgument},
+		{"empty", "proton", "INBOX", 77, "", himalaya.CodeInvalidArgument},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := s.checkUID("uid", tt.account, tt.mb, tt.uv, tt.u)
+			wantCode(t, err, tt.code, "")
+		})
+	}
+	// The same UID under its alias spelling is a duplicate, not a stale reference.
+	_, err := s.checkUIDs("proton", "INBOX", 77, UIDs{u, alias})
+	wantCode(t, err, himalaya.CodeInvalidArgument, "must be unique")
 }
 
 func TestGuardRecoversPanics(t *testing.T) {

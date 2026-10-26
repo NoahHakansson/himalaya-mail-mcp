@@ -21,7 +21,7 @@ type DraftOut struct {
 	Account     string `json:"account"`
 	Mailbox     string `json:"mailbox"`
 	UIDValidity uint32 `json:"uidvalidity"`
-	UID         uint32 `json:"uid"`
+	UID         UID    `json:"uid"`
 	MessageID   string `json:"message_id"`
 }
 
@@ -54,7 +54,7 @@ type UpdateDraftOut struct {
 	Account         string `json:"account"`
 	Mailbox         string `json:"mailbox"`
 	UIDValidity     uint32 `json:"uidvalidity"`
-	UID             uint32 `json:"uid"`
+	UID             UID    `json:"uid"`
 	MessageID       string `json:"message_id"`
 	PreviousTrashed string `json:"previous_trashed" jsonschema:"yes, no or uncertain"`
 	Error           string `json:"error,omitempty" jsonschema:"why the previous draft was not confirmed in trash"`
@@ -157,7 +157,7 @@ func (s *Server) saveDraft(ctx context.Context, a *account, uv uint32, raw []byt
 	if err != nil {
 		return DraftOut{}, himalaya.Errorf(himalaya.CodeOutcomeUncertain, check)
 	}
-	return DraftOut{Account: a.cfg.Name, Mailbox: drafts, UIDValidity: uv, UID: uid, MessageID: msgID}, nil
+	return DraftOut{Account: a.cfg.Name, Mailbox: drafts, UIDValidity: uv, UID: s.tagUID(a.cfg.Name, drafts, uv, uid), MessageID: msgID}, nil
 }
 
 func (s *Server) createDraft(ctx context.Context, in DraftIn) (DraftOut, error) {
@@ -194,7 +194,7 @@ func (s *Server) updateDraft(ctx context.Context, in UpdateDraftIn) (UpdateDraft
 	if err != nil {
 		return UpdateDraftOut{}, err
 	}
-	old, err := checkUID(in.UID)
+	old, err := s.checkUID("uid", a.cfg.Name, a.cfg.Mailboxes.Drafts, uv, in.UID)
 	if err != nil {
 		return UpdateDraftOut{}, err
 	}
