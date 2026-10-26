@@ -164,20 +164,24 @@ func TestUpdateFlagsReportsCompletedSteps(t *testing.T) {
 }
 
 func TestUpdateDraftTrashStep(t *testing.T) {
+	moved := answer{out: `{"message":"1 message successfully moved"}`}
 	tests := []struct {
 		name     string
+		recheck  answer // Drafts status after the new version was added
 		move     answer
 		trashed  string
 		errorHas string
 	}{
-		{"trashed", answer{out: `{"message":"1 message successfully moved"}`}, "yes", ""},
-		{"move uncertain", answer{err: uncertainErr()}, "uncertain", "outcome_uncertain"},
-		{"move failed before connecting", answer{err: himalaya.Errorf(himalaya.CodeAccountUnavailable, "")}, "no", "account_unavailable"},
+		{"trashed", answer{out: statusOK}, moved, "yes", ""},
+		{"move uncertain", answer{out: statusOK}, answer{err: uncertainErr()}, "uncertain", "outcome_uncertain"},
+		{"move failed before connecting", answer{out: statusOK}, answer{err: himalaya.Errorf(himalaya.CodeAccountUnavailable, "")}, "no", "account_unavailable"},
+		// The old uid may now be another message, so it is not moved.
+		{"drafts reset meanwhile", answer{out: statusChanged}, moved, "no", "stale_reference"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s, f := newTestServer(t, map[string][]answer{
-				"imap raw": {{out: capsOK}}, "imap status": {{out: statusOK}}, "imap fetch": {{out: fetch1}},
+				"imap raw": {{out: capsOK}}, "imap status": {{out: statusOK}, tt.recheck}, "imap fetch": {{out: fetch1}},
 				"message compose": {{out: composed}}, "message add": {{out: `{"id":"12","sent":false}`}},
 				"message move": {tt.move},
 			})
@@ -187,22 +191,51 @@ func TestUpdateDraftTrashStep(t *testing.T) {
 				out.PreviousTrashed != tt.trashed || !strings.Contains(out.Error, tt.errorHas) {
 				t.Fatalf("%+v %v", out, err)
 			}
-			if tt.trashed == "yes" {
-				wantCalls(t, f, "imap raw", "imap status", "imap fetch", "message compose", "message add", "message move", "imap status")
+			checked := []string{"imap raw", "imap status", "imap fetch", "message compose", "message add", "imap status"}
+			switch tt.name {
+			case "trashed":
+				wantCalls(t, f, append(checked, "message move", "imap status")...)
+			case "drafts reset meanwhile":
+				wantCalls(t, f, checked...)
 			}
 		})
 	}
 }
 
-func TestCreateDraftAddUncertainNamesMessageID(t *testing.T) {
-	s, f := newTestServer(t, map[string][]answer{
-		"imap raw": {{out: capsOK}}, "imap status": {{out: statusOK}},
-		"message compose": {{out: composed}}, "message add": {{err: uncertainErr()}},
-	})
-	_, err := s.createDraft(context.Background(), DraftIn{Account: "proton", To: Addresses{"bob@example.test"}})
-	wantCode(t, err, himalaya.CodeOutcomeUncertain, `look for message_id "abc.123@mail-mcp" in "Drafts"`)
-	// Drafts status runs before the append so a UIDVALIDITY reset makes the reference stale, never wrong.
-	wantCalls(t, f, "imap raw", "imap status", "message compose", "message add")
+// Once message add has run, the draft may exist whatever add reported, so
+// the error is outcome_uncertain with the message_id to look for in Drafts,
+// and update_draft leaves the previous draft alone.
+func TestDraftAddUncertainNamesMessageID(t *testing.T) {
+	const look = `look for message_id "abc.123@mail-mcp" in "Drafts"`
+	adds := []struct {
+		name string
+		add  answer
+	}{
+		{"add failed", answer{err: uncertainErr()}},
+		{"add result unrecognized", answer{out: `{"id":"","sent":false}`}},
+	}
+	for _, tt := range adds {
+		t.Run("create_draft "+tt.name, func(t *testing.T) {
+			s, f := newTestServer(t, map[string][]answer{
+				"imap raw": {{out: capsOK}}, "imap status": {{out: statusOK}},
+				"message compose": {{out: composed}}, "message add": {tt.add},
+			})
+			_, err := s.createDraft(context.Background(), DraftIn{Account: "proton", To: Addresses{"bob@example.test"}})
+			wantCode(t, err, himalaya.CodeOutcomeUncertain, look)
+			// Drafts status runs before the append so a UIDVALIDITY reset makes the reference stale, never wrong.
+			wantCalls(t, f, "imap raw", "imap status", "message compose", "message add")
+		})
+		t.Run("update_draft "+tt.name, func(t *testing.T) {
+			s, f := newTestServer(t, map[string][]answer{
+				"imap raw": {{out: capsOK}}, "imap status": {{out: statusOK}}, "imap fetch": {{out: fetch1}},
+				"message compose": {{out: composed}}, "message add": {tt.add},
+			})
+			_, err := s.updateDraft(context.Background(), UpdateDraftIn{Account: "proton", UIDValidity: 77, UID: 1, Subject: "s"})
+			wantCode(t, err, himalaya.CodeOutcomeUncertain, look)
+			wantCode(t, err, himalaya.CodeOutcomeUncertain, "the previous draft was left in place")
+			wantCalls(t, f, "imap raw", "imap status", "imap fetch", "message compose", "message add")
+		})
+	}
 }
 
 // message add would silently store only the lines before the first invalid

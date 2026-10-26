@@ -267,10 +267,11 @@ func TestDrafts(t *testing.T) {
 		}
 		trash := f.UIDs(t, Alice, "Trash")
 		m := e.mark(t)
-		got := muUpdateDraft.call(t, e.cs, mailmcp.UpdateDraftIn{
+		in := mailmcp.UpdateDraftIn{
 			Account: "alice", UIDValidity: drafts, UID: mailmcp.UID(created.UID),
 			To: mailmcp.Addresses{"carol@example.test"}, Subject: "Quarterly report v2", Body: "Version two.",
-		})
+		}
+		got := muUpdateDraft.call(t, e.cs, in)
 		if got.UID <= created.UID || got.PreviousTrashed != "yes" || got.MessageID == created.MessageID {
 			t.Errorf("update_draft %+v, want a new UID above %d and previous_trashed yes", got, created.UID)
 		}
@@ -287,6 +288,17 @@ func TestDrafts(t *testing.T) {
 		muAssertStrays(t, f, "Trash")
 		if got := muExpunges(e.eventsSince(t, m)); !slices.Equal(got, []string{"Drafts/" + strconv.Itoa(int(created.UID))}) {
 			t.Errorf("expunges %q, want only the old draft in Drafts", got)
+		}
+
+		// A retry whose first result was lost finds the old draft gone and saves nothing.
+		before := f.UIDs(t, Alice, "Drafts")
+		m = e.mark(t)
+		muUpdateDraft.wantCode(t, e.cs, in, himalaya.CodeNotFound)
+		if cmds := e.commandsSince(t, m); !slices.Equal(cmds, []string{"imap status", "imap fetch"}) {
+			t.Errorf("retry ran %q, want only the reference checks", cmds)
+		}
+		if got := f.UIDs(t, Alice, "Drafts"); !slices.Equal(got, before) {
+			t.Errorf("Drafts UIDs %v after the retry, want unchanged %v", got, before)
 		}
 	})
 
@@ -606,6 +618,60 @@ func TestStaleAndInvalidRefs(t *testing.T) {
 			t.Errorf("mail events: %+v", ev)
 		}
 	})
+
+	// Composing and adding the new version leave time for a reset, after
+	// which the old uid may be another message, so it is not moved.
+	t.Run("UIDVALIDITY reset while update_draft saves", func(t *testing.T) {
+		current := mailmcp.UIDValidity(f.Status(t, Alice, "Drafts").UIDValidity)
+		old := muFind(t, f, "Drafts", "alice-08@fixture.test")
+		if len(old) != 1 {
+			t.Fatalf("Drafts holds alice-08 at %v, want one copy", old)
+		}
+		e.shim.SetHook(t, []string{"message", "add"}, f.SetUIDValidityArgv(Alice, "Drafts", uint32(current)+1))
+		t.Cleanup(func() { e.shim.ClearHook(t) })
+		m := e.mark(t)
+		out := muUpdateDraft.call(t, e.cs, mailmcp.UpdateDraftIn{Account: "alice", UIDValidity: current, UID: mailmcp.UID(old[0]), Subject: "v2"})
+		if out.PreviousTrashed != "no" || !strings.HasPrefix(out.Error, "stale_reference: ") {
+			t.Errorf("update_draft %+v, want previous_trashed no with stale_reference", out)
+		}
+		if cmds := e.commandsSince(t, m); slices.Contains(cmds, "message move") {
+			t.Errorf("ran %q, want no message move after the reset", cmds)
+		}
+		if got := muFind(t, f, "Drafts", "alice-08@fixture.test"); !slices.Equal(got, old) {
+			t.Errorf("Drafts holds alice-08 at %v, want it left at %v", got, old)
+		}
+	})
+
+	// A move whose result was lost is safe to retry, and the moved message
+	// is found again by listing the target and matching its message_id;
+	// its old reference works neither in INBOX nor in Trash.
+	t.Run("retry and references after a move", func(t *testing.T) {
+		current := mailmcp.UIDValidity(f.Status(t, Alice, "INBOX").UIDValidity)
+		// Distinct values, or an INBOX reference would address Trash.
+		f.SetUIDValidity(t, Alice, "Trash", uint32(current)+1000)
+		in := mailmcp.BatchIn{Account: "alice", Mailbox: "INBOX", UIDValidity: current, UIDs: mailmcp.UIDs{3}}
+		muTrash.call(t, e.cs, in)
+		trash := f.UIDs(t, Alice, "Trash")
+		m := e.mark(t)
+		if text := muTrash.wantCode(t, e.cs, in, himalaya.CodeNotFound); !strings.Contains(text, "[3]") {
+			t.Errorf("not_found text %q does not name UID 3", text)
+		}
+		muReadMessage.wantCode(t, e.cs, read("INBOX", current, 3), himalaya.CodeNotFound)
+		muRestore.wantCode(t, e.cs, mailmcp.RestoreIn{Account: "alice", UIDValidity: current, UIDs: mailmcp.UIDs{3}}, himalaya.CodeStaleReference)
+		noMutation(t, m)
+		if got := f.UIDs(t, Alice, "Trash"); !slices.Equal(got, trash) {
+			t.Errorf("Trash UIDs %v, want unchanged %v", got, trash)
+		}
+
+		listed := muListMessages.call(t, e.cs, mailmcp.ListMessagesIn{Account: "alice", Mailbox: "Trash", PageSize: 1})
+		if len(listed.Messages) != 1 || listed.Messages[0].MessageID != "alice-03@fixture.test" {
+			t.Fatalf("first message in Trash %+v, want the trashed alice-03", listed.Messages)
+		}
+		muRestore.call(t, e.cs, mailmcp.RestoreIn{Account: "alice", UIDValidity: mailmcp.UIDValidity(listed.UIDValidity), UIDs: mailmcp.UIDs{mailmcp.UID(listed.Messages[0].UID)}})
+		if got := muFind(t, f, "INBOX", "alice-03@fixture.test"); len(got) != 1 {
+			t.Errorf("INBOX holds alice-03 at %v after restore, want one copy", got)
+		}
+	})
 }
 
 // --- helpers --------------------------------------------------------------
@@ -614,6 +680,7 @@ func TestStaleAndInvalidRefs(t *testing.T) {
 type muTool[In, Out any] string
 
 var (
+	muListMessages    = muTool[mailmcp.ListMessagesIn, mailmcp.ListMessagesOut]("list_messages")
 	muReadMessage     = muTool[mailmcp.ReadIn, mailmcp.ReadOut]("read_message")
 	muListAttachments = muTool[mailmcp.RefIn, mailmcp.ListAttachmentsOut]("list_attachments")
 	muDownload        = muTool[mailmcp.DownloadIn, mailmcp.DownloadOut]("download_attachment")

@@ -36,7 +36,7 @@ const (
 var sentences = map[Code]string{
 	CodeInvalidArgument:       "the input is not valid",
 	CodeForbidden:             "the operation is not allowed by the server policy",
-	CodeStaleReference:        "the mailbox UIDVALIDITY changed; list the mailbox again for fresh references",
+	CodeStaleReference:        "the uidvalidity does not match the mailbox, which was reset or is not the reference's mailbox; list the mailbox again for fresh references",
 	CodeNotFound:              "the message or attachment does not exist",
 	CodeMailboxNotFound:       "the mailbox does not exist",
 	CodeTooLarge:              "the message or output exceeds the configured size limit",
