@@ -294,7 +294,7 @@ func TestDrafts(t *testing.T) {
 		before := f.UIDs(t, Alice, "Drafts")
 		m = e.mark(t)
 		muUpdateDraft.wantCode(t, e.cs, in, himalaya.CodeNotFound)
-		if cmds := e.commandsSince(t, m); !slices.Equal(cmds, []string{"imap status", "imap fetch"}) {
+		if cmds := e.commandsSince(t, m); !slices.Equal(cmds, []string{"imap fetch", "imap status"}) {
 			t.Errorf("retry ran %q, want only the reference checks", cmds)
 		}
 		if got := f.UIDs(t, Alice, "Drafts"); !slices.Equal(got, before) {
@@ -597,6 +597,21 @@ func TestStaleAndInvalidRefs(t *testing.T) {
 		}
 	})
 
+	// The UIDVALIDITY check runs after the existence fetch, so a reset
+	// during the fetch stops the move.
+	t.Run("UIDVALIDITY reset during the existence fetch", func(t *testing.T) {
+		current := mailmcp.UIDValidity(f.Status(t, Alice, "INBOX").UIDValidity)
+		e.shim.SetHook(t, []string{"imap", "fetch"}, f.SetUIDValidityArgv(Alice, "INBOX", uint32(current)+1))
+		t.Cleanup(func() { e.shim.ClearHook(t) })
+		uids := f.UIDs(t, Alice, "INBOX")
+		m := e.mark(t)
+		muMove.wantCode(t, e.cs, move("INBOX", current, mailmcp.UID(uids[0])), himalaya.CodeStaleReference)
+		noMutation(t, m)
+		if got := f.UIDs(t, Alice, "INBOX"); !slices.Equal(got, uids) {
+			t.Errorf("INBOX UIDs %v, want unchanged %v", got, uids)
+		}
+	})
+
 	t.Run("UIDVALIDITY reset while a reply renders", func(t *testing.T) {
 		current := mailmcp.UIDValidity(f.Status(t, Alice, "INBOX").UIDValidity)
 		e.shim.SetHook(t, []string{"message", "reply"}, f.SetUIDValidityArgv(Alice, "INBOX", uint32(current)+1))
@@ -642,6 +657,22 @@ func TestStaleAndInvalidRefs(t *testing.T) {
 		}
 	})
 
+	// A reset between the checks and the download fetches another message's
+	// attachment, so nothing may reach files_dir.
+	t.Run("UIDVALIDITY reset during a download", func(t *testing.T) {
+		current := mailmcp.UIDValidity(f.Status(t, Alice, "INBOX").UIDValidity)
+		ref := mailmcp.RefIn{Account: "alice", Mailbox: "INBOX", UIDValidity: current, UID: 4}
+		part := e.partIDs(t, ref)["../../evil.sh"]
+		files := muDirNames(t, e.files.FilesDirs["alice"])
+		e.shim.SetHook(t, []string{"attachment", "download"}, f.SetUIDValidityArgv(Alice, "INBOX", uint32(current)+1))
+		t.Cleanup(func() { e.shim.ClearHook(t) })
+		muDownload.wantCode(t, e.cs, mailmcp.DownloadIn{Account: "alice", Mailbox: "INBOX", UIDValidity: current, UID: 4, PartID: mailmcp.PartID(part)}, himalaya.CodeStaleReference)
+		if got := muDirNames(t, e.files.FilesDirs["alice"]); !slices.Equal(got, files) {
+			t.Errorf("files_dir holds %q, want unchanged %q", got, files)
+		}
+		e.assertTmpEmpty(t)
+	})
+
 	// A move whose result was lost is safe to retry, and the moved message
 	// is found again by listing the target and matching its message_id;
 	// its old reference works neither in INBOX nor in Trash.
@@ -670,6 +701,83 @@ func TestStaleAndInvalidRefs(t *testing.T) {
 		muRestore.call(t, e.cs, mailmcp.RestoreIn{Account: "alice", UIDValidity: mailmcp.UIDValidity(listed.UIDValidity), UIDs: mailmcp.UIDs{mailmcp.UID(listed.Messages[0].UID)}})
 		if got := muFind(t, f, "INBOX", "alice-03@fixture.test"); len(got) != 1 {
 			t.Errorf("INBOX holds alice-03 at %v after restore, want one copy", got)
+		}
+	})
+}
+
+// TestAmbiguousWrites: a write that took effect but whose Himalaya process
+// then failed is outcome_uncertain, and the mail matches what the error and
+// the tool descriptions tell the agent to check: the draft named by
+// message_id is in Drafts exactly once, a moved message is in its target,
+// and a retry of the move changes nothing.
+func TestAmbiguousWrites(t *testing.T) {
+	HimalayaPath(t)
+	f := StartFixture(t, FixtureOptions{})
+	e := muStart(t, f, nil)
+	// failAfter makes runs of path complete and then fail. The returned
+	// check requires that the real command finished with exit 0.
+	failAfter := func(t *testing.T, path ...string) func() {
+		t.Helper()
+		e.shim.SetFailAfter(t, path)
+		t.Cleanup(func() { e.shim.ClearHook(t) })
+		m := e.mark(t)
+		return func() {
+			t.Helper()
+			e.shim.ClearHook(t)
+			recs := e.shim.Records(t)[m.runs:]
+			i := slices.IndexFunc(recs, func(r ShimRecord) bool { return commandPath(r.Argv) == strings.Join(path, " ") })
+			if i < 0 || recs[i].ChildExit == nil || *recs[i].ChildExit != 0 {
+				t.Fatalf("the real %s did not complete before the injected failure: %+v", strings.Join(path, " "), recs)
+			}
+		}
+	}
+	messageID := regexp.MustCompile(`message_id "([^"]+)"`)
+	// savedOnce requires the draft the error names to be in Drafts exactly once.
+	savedOnce := func(t *testing.T, text string) {
+		t.Helper()
+		id := messageID.FindStringSubmatch(text)
+		if id == nil {
+			t.Fatalf("error %q names no message_id", text)
+		}
+		if got := muFind(t, f, "Drafts", id[1]); len(got) != 1 {
+			t.Errorf("Drafts holds message_id %s at %v, want exactly one draft", id[1], got)
+		}
+	}
+
+	t.Run("create_draft", func(t *testing.T) {
+		done := failAfter(t, "message", "add")
+		text := muCreateDraft.wantCode(t, e.cs, mailmcp.DraftIn{Account: "alice", To: mailmcp.Addresses{"carol@example.test"}, Subject: "ambiguous"}, himalaya.CodeOutcomeUncertain)
+		done()
+		savedOnce(t, text)
+	})
+
+	t.Run("trash_messages", func(t *testing.T) {
+		in := mailmcp.BatchIn{Account: "alice", Mailbox: "INBOX", UIDValidity: mailmcp.UIDValidity(f.Status(t, Alice, "INBOX").UIDValidity), UIDs: mailmcp.UIDs{1}}
+		done := failAfter(t, "message", "move")
+		muTrash.wantCode(t, e.cs, in, himalaya.CodeOutcomeUncertain)
+		done()
+		if got := muFind(t, f, "Trash", "alice-01@fixture.test"); len(got) != 1 {
+			t.Errorf("Trash holds alice-01 at %v, want the moved message", got)
+		}
+		m := e.mark(t)
+		muTrash.wantCode(t, e.cs, in, himalaya.CodeNotFound)
+		if cmds := e.commandsSince(t, m); slices.Contains(cmds, "message move") {
+			t.Errorf("the retry ran %q, want no message move", cmds)
+		}
+	})
+
+	t.Run("update_draft", func(t *testing.T) {
+		old := muCreateDraft.call(t, e.cs, mailmcp.DraftIn{Account: "alice", Subject: "v1"})
+		done := failAfter(t, "message", "add")
+		m := e.mark(t)
+		text := muUpdateDraft.wantCode(t, e.cs, mailmcp.UpdateDraftIn{Account: "alice", UIDValidity: mailmcp.UIDValidity(old.UIDValidity), UID: mailmcp.UID(old.UID), Subject: "v2"}, himalaya.CodeOutcomeUncertain)
+		done()
+		savedOnce(t, text)
+		if got := muFind(t, f, "Drafts", old.MessageID); !slices.Equal(got, []uint32{old.UID}) {
+			t.Errorf("Drafts holds the previous draft at %v, want it left at %d", got, old.UID)
+		}
+		if cmds := e.commandsSince(t, m); slices.Contains(cmds, "message move") {
+			t.Errorf("ran %q, want no message move", cmds)
 		}
 	})
 }

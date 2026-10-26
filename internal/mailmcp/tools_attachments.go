@@ -102,6 +102,11 @@ func (s *Server) downloadAttachment(ctx context.Context, in DownloadIn) (Downloa
 	if err != nil || len(atts) != 1 || atts[0].PartID != part {
 		return DownloadOut{}, mailError()
 	}
+	// A reset since readRef would have downloaded another message's
+	// attachment, so check again before anything reaches files_dir.
+	if _, err := s.checkRef(ctx, a, mb, uv, []uint32{uid}); err != nil {
+		return DownloadOut{}, err
+	}
 	name := storedName(s.now(), atts[0].Filename)
 	size, sum, err := saveDownload(tmp, a.files, name, s.cfg.Limits.MaxAttachmentBytes)
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -107,7 +108,7 @@ func TestMoveFlow(t *testing.T) {
 		{"moved", map[string][]answer{
 			"imap raw": {{out: capsOK}}, "imap status": {{out: statusOK}}, "imap fetch": {{out: fetch12}},
 			"message move": {{out: `{"message":"2 messages successfully moved"}`}},
-		}, "", "", []string{"imap raw", "imap status", "imap status", "imap fetch", "message move", "imap status"}},
+		}, "", "", []string{"imap raw", "imap status", "imap fetch", "imap status", "message move", "imap status"}},
 		{"partial count", map[string][]answer{
 			"imap raw": {{out: capsOK}}, "imap status": {{out: statusOK}}, "imap fetch": {{out: fetch12}},
 			"message move": {{out: `{"message":"1 message successfully moved"}`}},
@@ -122,10 +123,15 @@ func TestMoveFlow(t *testing.T) {
 		}, himalaya.CodeOutcomeUncertain, `move from "INBOX" to "Archive"`, nil},
 		{"missing uid stops before the move", map[string][]answer{
 			"imap raw": {{out: capsOK}}, "imap status": {{out: statusOK}}, "imap fetch": {{out: fetch1}},
-		}, himalaya.CodeNotFound, "missing uids [2]", []string{"imap raw", "imap status", "imap status", "imap fetch"}},
+		}, himalaya.CodeNotFound, "missing uids [2]", []string{"imap raw", "imap status", "imap fetch", "imap status"}},
+		// The UIDVALIDITY check runs last before the move, after the fetch.
 		{"stale reference", map[string][]answer{
-			"imap raw": {{out: capsOK}}, "imap status": {{out: statusOK}, {out: statusChanged}},
-		}, himalaya.CodeStaleReference, `mailbox "INBOX"`, []string{"imap raw", "imap status", "imap status"}},
+			"imap raw": {{out: capsOK}}, "imap status": {{out: statusOK}, {out: statusChanged}}, "imap fetch": {{out: fetch12}},
+		}, himalaya.CodeStaleReference, `mailbox "INBOX"`, []string{"imap raw", "imap status", "imap fetch", "imap status"}},
+		// UIDs the fetch missed because of a reset are stale, not missing.
+		{"reset hides a uid", map[string][]answer{
+			"imap raw": {{out: capsOK}}, "imap status": {{out: statusOK}, {out: statusChanged}}, "imap fetch": {{out: fetch1}},
+		}, himalaya.CodeStaleReference, `mailbox "INBOX"`, []string{"imap raw", "imap status", "imap fetch", "imap status"}},
 		// Status of the target first: MOVE to a missing mailbox would be outcome_uncertain.
 		{"missing target", map[string][]answer{
 			"imap raw": {{out: capsOK}}, "imap status": {{err: himalaya.Errorf(himalaya.CodeMailboxNotFound, "")}},
@@ -152,15 +158,36 @@ func TestMoveFlow(t *testing.T) {
 	}
 }
 
-func TestUpdateFlagsReportsCompletedSteps(t *testing.T) {
-	s, f := newTestServer(t, map[string][]answer{
-		"imap raw": {{out: capsOK}}, "imap status": {{out: statusOK}}, "imap fetch": {{out: fetch12}},
-		"flag add": {{out: `{"flags":["seen"]}`}}, "flag remove": {{err: uncertainErr()}},
-	})
-	_, err := s.updateFlags(context.Background(), FlagsIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 77,
-		UIDs: UIDs{1, 2}, Seen: new(true), Flagged: new(false)})
-	wantCode(t, err, himalaya.CodeOutcomeUncertain, "completed before the failure: added seen")
-	wantCalls(t, f, "imap raw", "imap status", "imap fetch", "flag add", "flag remove")
+// update_flags reports the steps that completed, and confirms UIDVALIDITY
+// after each one so that a reset during the first stops the second.
+func TestUpdateFlagsSteps(t *testing.T) {
+	added := answer{out: `{"flags":["seen"]}`}
+	tests := []struct {
+		name   string
+		status []answer
+		remove []answer
+		detail string
+		calls  []string
+	}{
+		{"second step fails", []answer{{out: statusOK}}, []answer{{err: uncertainErr()}},
+			"completed before the failure: added seen",
+			[]string{"imap raw", "imap fetch", "imap status", "flag add", "imap status", "flag remove"}},
+		{"reset during the first step", []answer{{out: statusOK}, {out: statusChanged}}, nil,
+			`flags added seen, but the UIDVALIDITY of "INBOX" could not be confirmed`,
+			[]string{"imap raw", "imap fetch", "imap status", "flag add", "imap status"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, f := newTestServer(t, map[string][]answer{
+				"imap raw": {{out: capsOK}}, "imap status": tt.status, "imap fetch": {{out: fetch12}},
+				"flag add": {added}, "flag remove": tt.remove,
+			})
+			_, err := s.updateFlags(context.Background(), FlagsIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 77,
+				UIDs: UIDs{1, 2}, Seen: new(true), Flagged: new(false)})
+			wantCode(t, err, himalaya.CodeOutcomeUncertain, tt.detail)
+			wantCalls(t, f, tt.calls...)
+		})
+	}
 }
 
 func TestUpdateDraftTrashStep(t *testing.T) {
@@ -191,7 +218,7 @@ func TestUpdateDraftTrashStep(t *testing.T) {
 				out.PreviousTrashed != tt.trashed || !strings.Contains(out.Error, tt.errorHas) {
 				t.Fatalf("%+v %v", out, err)
 			}
-			checked := []string{"imap raw", "imap status", "imap fetch", "message compose", "message add", "imap status"}
+			checked := []string{"imap raw", "imap fetch", "imap status", "message compose", "message add", "imap status"}
 			switch tt.name {
 			case "trashed":
 				wantCalls(t, f, append(checked, "message move", "imap status")...)
@@ -233,7 +260,7 @@ func TestDraftAddUncertainNamesMessageID(t *testing.T) {
 			_, err := s.updateDraft(context.Background(), UpdateDraftIn{Account: "proton", UIDValidity: 77, UID: 1, Subject: "s"})
 			wantCode(t, err, himalaya.CodeOutcomeUncertain, look)
 			wantCode(t, err, himalaya.CodeOutcomeUncertain, "the previous draft was left in place")
-			wantCalls(t, f, "imap raw", "imap status", "imap fetch", "message compose", "message add")
+			wantCalls(t, f, "imap raw", "imap fetch", "imap status", "message compose", "message add")
 		})
 	}
 }
@@ -248,6 +275,24 @@ func TestCreateDraftRefusesComposeOutputThatIsNotUTF8(t *testing.T) {
 	_, err := s.createDraft(context.Background(), DraftIn{Account: "proton", To: Addresses{"bob@example.test"}})
 	wantCode(t, err, himalaya.CodeMailError, "")
 	wantCalls(t, f, "imap raw", "imap status", "message compose")
+}
+
+// A reset between the checks and the download would fetch another
+// message's attachment, so download_attachment checks again before saving.
+func TestDownloadRechecksBeforeSaving(t *testing.T) {
+	s, f := newTestServer(t, map[string][]answer{
+		"imap status": {{out: statusOK}, {out: statusChanged}}, "imap fetch": {{out: fetch1}},
+		"attachment download": {{out: `{"attachments":[{"id":"3","filename":"a.txt","mime":"text/plain","size":5,"inline":false}]}`}},
+	})
+	_, err := s.downloadAttachment(context.Background(), DownloadIn{Account: "proton", Mailbox: "INBOX", UIDValidity: 77, UID: 1, PartID: 3})
+	wantCode(t, err, himalaya.CodeStaleReference, `mailbox "INBOX"`)
+	wantCalls(t, f, "imap status", "imap fetch", "attachment download", "imap status")
+	if names, _ := fs.ReadDir(s.roots["proton"].FS(), "."); len(names) != 0 {
+		t.Errorf("files_dir holds %v", names)
+	}
+	if names, _ := os.ReadDir(s.tmpDir()); len(names) != 0 {
+		t.Errorf("<state>/tmp holds %v", names)
+	}
 }
 
 func TestReadChecksSizeBeforeFetchingTheBody(t *testing.T) {
@@ -353,7 +398,7 @@ func TestRemoveLabelRequiresDeletedResult(t *testing.T) {
 	})
 	_, err := s.removeLabel(context.Background(), RemoveLabelIn{Account: "proton", Label: "Labels/Work", UIDValidity: 77, UIDs: UIDs{1}})
 	wantCode(t, err, himalaya.CodeOutcomeUncertain, `removing label "Labels/Work"`)
-	wantCalls(t, f, "imap raw", "imap status", "imap fetch", "message delete")
+	wantCalls(t, f, "imap raw", "imap fetch", "imap status", "message delete")
 	if left, _ := os.ReadDir(s.tmpDir()); len(left) != 0 {
 		t.Errorf("per-call config left behind: %v", left)
 	}

@@ -148,6 +148,19 @@ imap.sasl.plain.password.command = ["/bin/cat", %q]
 		}
 		shim.AssertEnv(t, env)
 
+		// fail_after: the real command completes, its output is replaced by
+		// a connection reset and the exit status is 1.
+		shim.SetFailAfter(t, []string{"imap", "status"})
+		code, out := run(good, nil, "imap", "status", "--", "INBOX")
+		shim.ClearHook(t)
+		after := shim.Records(t)
+		if len(after) != len(recs)+1 {
+			t.Fatalf("shim logged %d runs for one fail_after call", len(after)-len(recs))
+		}
+		if last := after[len(recs)]; code != 1 || out != FailAfterOutput || !last.Hook || last.ChildExit == nil || *last.ChildExit != 0 {
+			t.Errorf("fail_after: exit %d, stdout %q, record %+v", code, out, last)
+		}
+
 		uid := f.Seed(t, Alice, "Labels/Work", Message(t, "stray-deleted.eml"), `\Deleted`)
 		if got := f.Flags(t, Alice, "Labels/Work"); uid != 2 || !slices.Equal(got[uid], []string{`\Deleted`}) {
 			t.Errorf("seeded stray uid %d, Labels/Work flags %v", uid, got)

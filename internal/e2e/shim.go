@@ -32,7 +32,12 @@ type ShimRecord struct {
 	Env       []string `json:"env"`
 	Hook      bool     `json:"hook,omitempty"` // the hook ran before the exec
 	HookError string   `json:"hook_error,omitempty"`
+	ChildExit *int     `json:"child_exit,omitempty"` // the real command's exit status under SetFailAfter
 }
+
+// FailAfterOutput is what the shim prints after a command SetFailAfter
+// matched, before it exits 1.
+const FailAfterOutput = `{"error":"cannot complete IMAP command","sources":["Connection reset by peer (os error 104)"]}` + "\n"
 
 // shimRecords collects every shim's records at cleanup, for TestMain's audit.
 var shimRecords struct {
@@ -157,6 +162,19 @@ func (s *Shim) SetHook(t testing.TB, match, argv []string) {
 		t.Fatalf("hook argv %q must start with an absolute path", argv)
 	}
 	data, err := json.Marshal(map[string][]string{"match_subcommand": match, "run": argv})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, s.Path+".hook", data, 0o600)
+}
+
+// SetFailAfter makes the shim run any command whose path equals match to
+// completion, discard its stdout, then print FailAfterOutput and exit 1: a
+// write that took effect but whose result was lost. The record's ChildExit
+// holds the real command's exit status.
+func (s *Shim) SetFailAfter(t testing.TB, match []string) {
+	t.Helper()
+	data, err := json.Marshal(map[string]any{"match_subcommand": match, "fail_after": true})
 	if err != nil {
 		t.Fatal(err)
 	}
