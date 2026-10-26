@@ -22,7 +22,7 @@ type (
 	Mailbox     string
 	Label       string
 	UIDValidity int64
-	UID         int64
+	UID         string // "<uid>.<tag>", see tagUID
 	UIDs        []UID
 	Address     string
 	Addresses   []Address
@@ -60,6 +60,9 @@ const (
 )
 
 const (
+	uidPattern    = `^[1-9][0-9]{0,9}\.[A-Za-z0-9_-]{11}$`
+	minUIDLen     = 1 + 1 + tagLen
+	maxUIDLen     = 10 + 1 + tagLen
 	noControl     = `^[^\x00-\x1f\x7f-\x9f]*$`
 	mailboxSchema = `^[^\-\x00-\x1f\x7f-\x9f][^\x00-\x1f\x7f-\x9f]*$`
 )
@@ -81,7 +84,7 @@ func schemaOptions(accounts []string) *jsonschema.ForOptions {
 		}
 		return s
 	}
-	uid := integer("message UID within the mailbox's UIDVALIDITY epoch", 1, himalaya.MaxUID, 0)
+	uid := str("uid exactly as a tool returned it, with its suffix; it works only with the mailbox and uidvalidity it was listed with", minUIDLen, maxUIDLen, uidPattern)
 	addr := str("bare address such as user@example.com, no display name", 3, 254, `^[^\-\s"(),:;<>\[\\\]][^\s"(),:;<>\[\\\]]*$`)
 	file := str("file name in the account's files directory, as returned by download_attachment", 1, maxFileName, `^[^.\-/\\\x00-\x1f\x7f][^/\\\x00-\x1f\x7f]*$`)
 	return &jsonschema.ForOptions{TypeSchemas: map[reflect.Type]*jsonschema.Schema{
@@ -134,33 +137,6 @@ func checkUIDValidity(v UIDValidity) (uint32, error) {
 		return 0, invalid("uidvalidity", "must be 1..4294967295")
 	}
 	return uint32(v), nil
-}
-
-func checkUID(u UID) (uint32, error) {
-	if u < 1 || u > himalaya.MaxUID {
-		return 0, invalid("uid", fmt.Sprintf("must be 1..%d", himalaya.MaxUID))
-	}
-	return uint32(u), nil
-}
-
-func checkUIDs(us UIDs) ([]uint32, error) {
-	if len(us) < 1 || len(us) > maxUIDs {
-		return nil, invalid("uids", fmt.Sprintf("must hold 1..%d UIDs", maxUIDs))
-	}
-	out := make([]uint32, 0, len(us))
-	seen := map[UID]bool{}
-	for _, u := range us {
-		v, err := checkUID(u)
-		if err != nil {
-			return nil, err
-		}
-		if seen[u] {
-			return nil, invalid("uids", "must be unique")
-		}
-		seen[u] = true
-		out = append(out, v)
-	}
-	return out, nil
 }
 
 func checkAddresses(field string, as Addresses) ([]string, error) {

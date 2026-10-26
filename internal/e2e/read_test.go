@@ -36,7 +36,7 @@ type rdAddress struct {
 }
 
 type rdSummary struct {
-	UID           uint32      `json:"uid"`
+	UID           string      `json:"uid"`
 	MessageID     string      `json:"message_id"`
 	From          []rdAddress `json:"from"`
 	Subject       string      `json:"subject"`
@@ -89,7 +89,7 @@ type rdAttachment struct {
 
 type rdDraft struct {
 	Mailbox   string `json:"mailbox"`
-	UID       uint32 `json:"uid"`
+	UID       string `json:"uid"`
 	MessageID string `json:"message_id"`
 }
 
@@ -138,10 +138,11 @@ func rdCode(text string) string {
 	return code
 }
 
-func rdUIDs(msgs []rdSummary) []uint32 {
+func rdUIDs(t *testing.T, msgs []rdSummary) []uint32 {
+	t.Helper()
 	uids := []uint32{}
 	for _, m := range msgs {
-		uids = append(uids, m.UID)
+		uids = append(uids, uidNumber(t, m.UID))
 	}
 	return uids
 }
@@ -170,6 +171,26 @@ var rdWantHints = map[string]rdHints{
 	"update_draft":        {Destructive: true},
 	"reply_draft":         {},
 	"forward_draft":       {},
+}
+
+// rdNumericUIDs returns the uid and uids properties of an input schema
+// whose values are not strings with the tagged-uid pattern.
+func rdNumericUIDs(s any) []string {
+	props, _ := s.(map[string]any)["properties"].(map[string]any)
+	var bad []string
+	for _, name := range []string{"uid", "uids"} {
+		p, ok := props[name].(map[string]any)
+		if !ok {
+			continue
+		}
+		if name == "uids" {
+			p, _ = p["items"].(map[string]any)
+		}
+		if p["type"] != "string" || p["pattern"] != `^[1-9][0-9]{0,9}\.[A-Za-z0-9_-]{11}$` {
+			bad = append(bad, name)
+		}
+	}
+	return bad
 }
 
 // rdOpenObjects returns the path of every object schema under s that does
@@ -229,6 +250,9 @@ func TestToolList(t *testing.T) {
 		if open := rdOpenObjects("#", tool.InputSchema); len(open) > 0 {
 			t.Errorf("%s: object schemas without additionalProperties:false at %v", tool.Name, open)
 		}
+		if bad := rdNumericUIDs(tool.InputSchema); len(bad) > 0 {
+			t.Errorf("%s: %v are not tagged-uid strings", tool.Name, bad)
+		}
 	}
 	if missing := slices.DeleteFunc(slices.Sorted(maps.Keys(rdWantHints)), func(n string) bool { return seen[n] }); len(missing) > 0 {
 		t.Errorf("missing tools %v", missing)
@@ -270,11 +294,15 @@ func TestToolList(t *testing.T) {
 		args rdArgs
 	}{
 		{"list_accounts", rdArgs{"cmd": "message send"}},
-		{"update_flags", rdArgs{"account": "alice", "mailbox": "INBOX", "uidvalidity": 1, "uids": []int{1}, "seen": true, "cmd": "message send"}},
+		{"update_flags", rdArgs{"account": "alice", "mailbox": "INBOX", "uidvalidity": 1, "uids": []string{"1.AAAAAAAAAAA"}, "seen": true, "cmd": "message send"}},
 	} {
 		if text := rdFail(t, cs, c.tool, c.args); !strings.HasPrefix(text, `validating "arguments"`) || !strings.Contains(text, "cmd") {
 			t.Errorf("%s with an extra cmd argument: %q, want a schema rejection naming cmd", c.tool, text)
 		}
+	}
+	// UIDs travel as tagged strings; a bare number is refused by the schema.
+	if text := rdFail(t, cs, "read_message", rdArgs{"account": "alice", "mailbox": "INBOX", "uidvalidity": 1, "uid": 1}); !strings.HasPrefix(text, `validating "arguments"`) || !strings.Contains(text, "uid") {
+		t.Errorf("read_message with a numeric uid: %q, want a schema rejection naming uid", text)
 	}
 	if recs := shim.Records(t); len(recs) != runs {
 		t.Errorf("rejected calls and list_accounts ran Himalaya: %+v", recs[runs:])
@@ -385,8 +413,17 @@ func TestReadPath(t *testing.T) {
 	cs := StartStdio(t, bin, files)
 
 	inbox := f.Status(t, Alice, "INBOX")
-	ref := func(mailbox string, uid uint32) rdArgs {
-		return rdArgs{"account": "alice", "mailbox": mailbox, "uidvalidity": f.Status(t, Alice, mailbox).UIDValidity, "uid": uid}
+	// ref lists mailbox, as an agent would, and returns the reference of the message with IMAP UID uid.
+	ref := func(t *testing.T, mailbox string, uid uint32) rdArgs {
+		t.Helper()
+		out := rdOut[rdList](t, cs, "list_messages", rdArgs{"account": "alice", "mailbox": mailbox, "page_size": 50})
+		for _, m := range out.Messages {
+			if uidNumber(t, m.UID) == uid {
+				return rdArgs{"account": "alice", "mailbox": mailbox, "uidvalidity": out.UIDValidity, "uid": m.UID}
+			}
+		}
+		t.Fatalf("list_messages on %s has no uid %d", mailbox, uid)
+		return nil
 	}
 
 	t.Run("mailboxes", func(t *testing.T) {
@@ -424,14 +461,14 @@ func TestReadPath(t *testing.T) {
 		for i, want := range [][]uint32{{6, 5}, {4, 3}, {2, 1}, {}} {
 			page := i + 1
 			out := rdOut[rdList](t, cs, "list_messages", rdArgs{"account": "alice", "mailbox": "inbox", "page": page, "page_size": 2})
-			if got := rdUIDs(out.Messages); !slices.Equal(got, want) {
+			if got := rdUIDs(t, out.Messages); !slices.Equal(got, want) {
 				t.Errorf("page %d: uids %v, want %v", page, got, want)
 			}
 			if out.Mailbox != "INBOX" || out.UIDValidity != inbox.UIDValidity || out.Total != 6 || out.Unseen != 4 || out.Page != page || out.PageSize != 2 {
 				t.Errorf("page %d: %+v, want INBOX with uidvalidity %d, total 6, unseen 4", page, out, inbox.UIDValidity)
 			}
 			for _, m := range out.Messages {
-				switch m.UID {
+				switch uidNumber(t, m.UID) {
 				case 5:
 					if m.Subject != "Grüße – 日本語 📬" || len(m.From) != 1 || m.From[0] != (rdAddress{"Björn Åström", "bjorn@example.test"}) ||
 						!slices.Equal(m.Flags, []string{"seen", "flagged"}) || m.MessageID != "alice-05@fixture.test" {
@@ -453,10 +490,10 @@ func TestReadPath(t *testing.T) {
 	t.Run("unicode folder", func(t *testing.T) {
 		const box = "Résumé/Ünïcødé 📬"
 		out := rdOut[rdList](t, cs, "list_messages", rdArgs{"account": "alice", "mailbox": box})
-		if got := rdUIDs(out.Messages); out.Mailbox != box || !slices.Equal(got, []uint32{1}) || out.Messages[0].Subject != "In the Résumé folder" {
+		if got := rdUIDs(t, out.Messages); out.Mailbox != box || !slices.Equal(got, []uint32{1}) || out.Messages[0].Subject != "In the Résumé folder" {
 			t.Fatalf("list_messages %q = %+v", box, out)
 		}
-		msg := rdOut[rdRead](t, cs, "read_message", ref(box, 1))
+		msg := rdOut[rdRead](t, cs, "read_message", ref(t, box, 1))
 		if len(msg.From) != 1 || msg.From[0].Name != "Zoë" || !strings.Contains(msg.Body, "Message stored under a Unicode mailbox name.") {
 			t.Errorf("read_message %q 1 = %+v", box, msg)
 		}
@@ -486,7 +523,7 @@ func TestReadPath(t *testing.T) {
 			t.Run(c.name, func(t *testing.T) {
 				args := maps.Clone(c.args)
 				args["account"], args["mailbox"] = "alice", c.mailbox
-				if got := rdUIDs(rdOut[rdList](t, cs, "search_messages", args).Messages); !slices.Equal(got, c.want) {
+				if got := rdUIDs(t, rdOut[rdList](t, cs, "search_messages", args).Messages); !slices.Equal(got, c.want) {
 					t.Errorf("uids %v, want %v", got, c.want)
 				}
 			})
@@ -505,26 +542,26 @@ func TestReadPath(t *testing.T) {
 	})
 
 	t.Run("read", func(t *testing.T) {
-		plain := rdOut[rdRead](t, cs, "read_message", ref("INBOX", 1))
+		plain := rdOut[rdRead](t, cs, "read_message", ref(t, "INBOX", 1))
 		if plain.BodyFormat != "text" || plain.MessageID != "alice-01@fixture.test" || plain.Subject != "Plain hello (unseen)" || plain.Date != "2026-10-05T09:00:00Z" ||
 			!strings.Contains(plain.Body, "This is a plain text message that starts unseen.") {
 			t.Errorf("read_message INBOX 1 = %+v", plain)
 		}
 
-		headers := rdOut[rdRead](t, cs, "read_message", ref("Folders/Projects", orderUID))
+		headers := rdOut[rdRead](t, cs, "read_message", ref(t, "Folders/Projects", orderUID))
 		if !slices.Equal(headers.Cc, []rdAddress{{"Dave Example", "dave@example.test"}}) ||
 			!slices.Equal(headers.ReplyTo, []rdAddress{{"Carol Replies", "carol-replies@example.test"}}) {
 			t.Errorf("read_message cc %+v, reply_to %+v", headers.Cc, headers.ReplyTo)
 		}
 
 		// multipart/alternative: the text part is the body; nothing from the HTML part leaks.
-		alt := rdOut[rdRead](t, cs, "read_message", ref("INBOX", 3))
+		alt := rdOut[rdRead](t, cs, "read_message", ref(t, "INBOX", 3))
 		if alt.BodyFormat != "text" || !strings.Contains(alt.Body, "Plain alternative of the newsletter.") ||
 			strings.ContainsAny(alt.Body, "<>") || strings.Contains(alt.Body, "tracker.invalid") || strings.Contains(alt.Body, "phish.invalid") {
 			t.Errorf("read_message INBOX 3 = %+v", alt)
 		}
 
-		html := rdOut[rdRead](t, cs, "read_message", ref("Archive", htmlUID))
+		html := rdOut[rdRead](t, cs, "read_message", ref(t, "Archive", htmlUID))
 		if html.BodyFormat != "html_stripped" || !strings.Contains(html.Body, "HTML newsletter body.") || !strings.Contains(html.Body, "Click here to verify your account") {
 			t.Errorf("read_message of the HTML-only newsletter = %+v", html)
 		}
@@ -537,7 +574,7 @@ func TestReadPath(t *testing.T) {
 		// The prompt injection is returned verbatim as data.
 		eml := Message(t, "alice-06-prompt-injection.eml")
 		_, body, _ := bytes.Cut(eml, []byte("\n\n"))
-		inj := rdOut[rdRead](t, cs, "read_message", ref("INBOX", 6))
+		inj := rdOut[rdRead](t, cs, "read_message", ref(t, "INBOX", 6))
 		if inj.BodyFormat != "text" || strings.TrimRight(inj.Body, "\n") != strings.TrimRight(string(body), "\n") {
 			t.Errorf("read_message INBOX 6 body %q (%s), want %q", inj.Body, inj.BodyFormat, body)
 		}
@@ -559,7 +596,7 @@ func TestReadPath(t *testing.T) {
 		}
 		got := rdOut[struct {
 			Attachments []rdAttachment `json:"attachments"`
-		}](t, cs, "list_attachments", ref("INBOX", 4))
+		}](t, cs, "list_attachments", ref(t, "INBOX", 4))
 		if !slices.Equal(got.Attachments, want) {
 			t.Errorf("list_attachments INBOX 4 =\n%+v\nwant\n%+v", got.Attachments, want)
 		}
@@ -567,12 +604,12 @@ func TestReadPath(t *testing.T) {
 		// The bidi override and zero-width space are dropped; tab and newline become spaces.
 		hostile := rdOut[struct {
 			Attachments []rdAttachment `json:"attachments"`
-		}](t, cs, "list_attachments", ref("Folders/Projects", orderUID))
+		}](t, cs, "list_attachments", ref(t, "Folders/Projects", orderUID))
 		if wantH := []rdAttachment{{3, "invoicefdp.exe x .txt", "application/octet-stream"}}; !slices.Equal(hostile.Attachments, wantH) {
 			t.Errorf("list_attachments of the hidden-extension name = %+v, want %+v", hostile.Attachments, wantH)
 		}
 
-		args := ref("INBOX", 4)
+		args := ref(t, "INBOX", 4)
 		args["part_id"] = 3
 		rdOut[struct {
 			File string `json:"file"`
@@ -581,16 +618,16 @@ func TestReadPath(t *testing.T) {
 
 	var drafts []rdDraft
 	t.Run("reply and forward sources", func(t *testing.T) {
-		reply := ref("INBOX", 1)
+		reply := ref(t, "INBOX", 1)
 		reply["body"] = "Thanks, Carol."
-		forward := ref("INBOX", 3)
+		forward := ref(t, "INBOX", 3)
 		forward["to"] = []string{"carol@example.test"}
 		for _, c := range []struct {
 			tool string
 			args rdArgs
 		}{{"reply_draft", reply}, {"forward_draft", forward}} {
 			d := rdOut[rdDraft](t, cs, c.tool, c.args)
-			if d.Mailbox != "Drafts" || d.UID == 0 || d.MessageID == "" {
+			if d.Mailbox != "Drafts" || d.UID == "" || d.MessageID == "" {
 				t.Errorf("%s = %+v, want a reference into Drafts", c.tool, d)
 			}
 			drafts = append(drafts, d)
@@ -600,7 +637,7 @@ func TestReadPath(t *testing.T) {
 	after := rdFlagSnapshot(t, f)
 	newDrafts := map[uint32][]string{}
 	for _, d := range drafts {
-		newDrafts[d.UID] = []string{`\Draft`, `\Seen`}
+		newDrafts[uidNumber(t, d.UID)] = []string{`\Draft`, `\Seen`}
 	}
 	for box, want := range before {
 		got := after[box]
@@ -664,9 +701,14 @@ func TestAccountIsolation(t *testing.T) {
 		t.Errorf("bob's INBOX holds %q (total %d), want only bob's two messages", ids, bobInbox.Total)
 	}
 
-	// Dovecot derives UIDVALIDITY from the clock, so the two INBOXes may match; make them differ.
+	// The uid's tag names alice, so her reference is refused on bob even
+	// with both INBOXes at the same UIDVALIDITY and bob holding that UID.
 	aliceInbox := rdOut[rdList](t, cs, "list_messages", rdArgs{"account": "alice", "mailbox": "INBOX"})
-	f.SetUIDValidity(t, Bob, "INBOX", aliceInbox.UIDValidity+1)
+	aliceUID := aliceInbox.Messages[len(aliceInbox.Messages)-1].UID
+	f.SetUIDValidity(t, Bob, "INBOX", aliceInbox.UIDValidity)
+	if !slices.Contains(f.UIDs(t, Bob, "INBOX"), uidNumber(t, aliceUID)) {
+		t.Fatalf("bob's INBOX %v lacks UID %s", f.UIDs(t, Bob, "INBOX"), aliceUID)
+	}
 	bobFlags := f.Flags(t, Bob, "INBOX")
 	events := len(f.MailLog(t))
 	aliceRef := rdArgs{"account": "bob", "mailbox": "INBOX", "uidvalidity": aliceInbox.UIDValidity}
@@ -674,8 +716,8 @@ func TestAccountIsolation(t *testing.T) {
 		tool string
 		args rdArgs
 	}{
-		{"read_message", rdArgs{"uid": 1}},
-		{"update_flags", rdArgs{"uids": []int{1}, "seen": true}},
+		{"read_message", rdArgs{"uid": aliceUID}},
+		{"update_flags", rdArgs{"uids": []string{aliceUID}, "seen": true}},
 	} {
 		args := maps.Clone(aliceRef)
 		maps.Copy(args, c.args)

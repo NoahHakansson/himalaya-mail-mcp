@@ -166,8 +166,9 @@ func (c *Config) applyDefaults() {
 			if *f.v == "" {
 				*f.v = f.def
 			}
+			// Inputs spell inbox as INBOX, and UID tags must match them.
+			*f.v = NormalizeMailbox(*f.v)
 		}
-		m.Inbox = NormalizeMailbox(m.Inbox)
 		if a.ProtectedMailboxes == nil {
 			a.ProtectedMailboxes = slices.Clone(DefaultProtectedMailboxes)
 		}

@@ -30,7 +30,7 @@ func (s *Server) batchIn(acct Account, mailbox Mailbox, v UIDValidity, us UIDs) 
 	if err != nil {
 		return nil, "", 0, nil, err
 	}
-	uids, err := checkUIDs(us)
+	uids, err := s.checkUIDs(a.cfg.Name, mb, uv, us)
 	if err != nil {
 		return nil, "", 0, nil, err
 	}
@@ -195,7 +195,7 @@ func (s *Server) restoreMessages(ctx context.Context, in RestoreIn) (MoveOut, er
 	if err != nil {
 		return MoveOut{}, err
 	}
-	uids, err := checkUIDs(in.UIDs)
+	uids, err := s.checkUIDs(a.cfg.Name, a.cfg.Mailboxes.Trash, uv, in.UIDs)
 	if err != nil {
 		return MoveOut{}, err
 	}

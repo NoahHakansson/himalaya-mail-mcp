@@ -44,19 +44,20 @@ import (
 func TestAttachments(t *testing.T) {
 	HimalayaPath(t)
 	f := StartFixture(t, FixtureOptions{})
-	ref := mailmcp.RefIn{Account: "alice", Mailbox: "INBOX", UIDValidity: mailmcp.UIDValidity(f.Status(t, Alice, "INBOX").UIDValidity), UID: 4}
+	const attached = "alice-04@fixture.test"
 	source := muParse(t, Message(t, "alice-04-adversarial-attachments.eml")).attachments
 	evil := source["../../evil.sh"]
-	download := func(part int) mailmcp.DownloadIn {
+	download := func(ref mailmcp.RefIn, part int) mailmcp.DownloadIn {
 		return mailmcp.DownloadIn{Account: ref.Account, Mailbox: ref.Mailbox, UIDValidity: ref.UIDValidity, UID: ref.UID, PartID: mailmcp.PartID(part)}
 	}
 
 	t.Run("download", func(t *testing.T) {
 		e := muStart(t, f, nil)
 		dir := e.files.FilesDirs["alice"]
+		ref := e.refIn(t, "INBOX", attached)
 		parts := e.partIDs(t, ref)
 
-		got := muDownload.call(t, e.cs, download(parts["../../evil.sh"]))
+		got := muDownload.call(t, e.cs, download(ref, parts["../../evil.sh"]))
 		if !regexp.MustCompile(`^[0-9]{8}-[0-9a-f]{8}-_\.\._evil\.sh$`).MatchString(got.File) {
 			t.Errorf("stored name %q, want <date>-<hex>-_.._evil.sh", got.File)
 		}
@@ -85,7 +86,7 @@ func TestAttachments(t *testing.T) {
 		if long == "" {
 			t.Fatal("alice-04 lists no attachment with a name over 255 bytes")
 		}
-		muDownload.wantCode(t, e.cs, download(parts[long]), himalaya.CodeAttachmentUnsupported)
+		muDownload.wantCode(t, e.cs, download(ref, parts[long]), himalaya.CodeAttachmentUnsupported)
 		if names := muDirNames(t, dir); !slices.Equal(names, []string{got.File}) {
 			t.Errorf("files_dir holds %q, want only %q", names, got.File)
 		}
@@ -143,6 +144,7 @@ func TestAttachments(t *testing.T) {
 			t.Fatalf("alice-04 has %d bytes, want more than %d", size, limit)
 		}
 		e := muStart(t, f, func(c *ServerConfig) { c.Limits.MaxMessageBytes = limit })
+		ref := e.refIn(t, "INBOX", attached)
 		read := mailmcp.ReadIn{Account: ref.Account, Mailbox: ref.Mailbox, UIDValidity: ref.UIDValidity, UID: ref.UID}
 		to := mailmcp.Addresses{"carol@example.test"}
 		for _, c := range []struct {
@@ -152,7 +154,7 @@ func TestAttachments(t *testing.T) {
 			{"read_message", func() { muReadMessage.wantCode(t, e.cs, read, himalaya.CodeTooLarge) }},
 			{"list_attachments", func() { muListAttachments.wantCode(t, e.cs, ref, himalaya.CodeTooLarge) }},
 			// Any part ID: the size check comes first.
-			{"download_attachment", func() { muDownload.wantCode(t, e.cs, download(3), himalaya.CodeTooLarge) }},
+			{"download_attachment", func() { muDownload.wantCode(t, e.cs, download(ref, 3), himalaya.CodeTooLarge) }},
 			{"reply_draft", func() {
 				muReplyDraft.wantCode(t, e.cs, mailmcp.ReplyIn{Account: ref.Account, Mailbox: ref.Mailbox, UIDValidity: ref.UIDValidity, UID: ref.UID, Body: "ok"}, himalaya.CodeTooLarge)
 			}},
@@ -170,8 +172,8 @@ func TestAttachments(t *testing.T) {
 			}
 		}
 		// The limit is a threshold: a small message is still readable.
-		read.UID = 1
-		muReadMessage.call(t, e.cs, read)
+		small := e.refIn(t, "INBOX", "alice-01@fixture.test")
+		muReadMessage.call(t, e.cs, mailmcp.ReadIn{Account: small.Account, Mailbox: small.Mailbox, UIDValidity: small.UIDValidity, UID: small.UID})
 		if names := muDirNames(t, e.files.FilesDirs["alice"]); len(names) != 0 {
 			t.Errorf("files_dir holds %q, want nothing", names)
 		}
@@ -186,12 +188,13 @@ func TestAttachments(t *testing.T) {
 		}
 		e := muStart(t, f, func(c *ServerConfig) { c.Limits.MaxAttachmentBytes = limit })
 		dir := e.files.FilesDirs["alice"]
+		ref := e.refIn(t, "INBOX", attached)
 		parts := e.partIDs(t, ref)
-		muDownload.wantCode(t, e.cs, download(parts["../../evil.sh"]), himalaya.CodeTooLarge)
+		muDownload.wantCode(t, e.cs, download(ref, parts["../../evil.sh"]), himalaya.CodeTooLarge)
 		if names := muDirNames(t, dir); len(names) != 0 {
 			t.Errorf("files_dir holds %q after a refused download, want nothing", names)
 		}
-		got := muDownload.call(t, e.cs, download(parts["a/b.txt"]))
+		got := muDownload.call(t, e.cs, download(ref, parts["a/b.txt"]))
 		if names := muDirNames(t, dir); !slices.Equal(names, []string{got.File}) {
 			t.Errorf("files_dir holds %q, want only %q", names, got.File)
 		}
@@ -208,7 +211,6 @@ func TestDrafts(t *testing.T) {
 	f := StartFixture(t, FixtureOptions{StrayDeleted: true})
 	e := muStart(t, f, nil)
 	drafts := mailmcp.UIDValidity(f.Status(t, Alice, "Drafts").UIDValidity)
-	inbox := mailmcp.UIDValidity(f.Status(t, Alice, "INBOX").UIDValidity)
 	sent := f.UIDs(t, Alice, "Sent")
 	// message add stops silently at the first line that is not UTF-8, so a
 	// draft carrying these bytes must still arrive whole.
@@ -230,10 +232,10 @@ func TestDrafts(t *testing.T) {
 		if created.Mailbox != "Drafts" || created.UIDValidity != uint32(drafts) {
 			t.Errorf("draft reference %+v, want Drafts with uidvalidity %d", created, drafts)
 		}
-		if got := f.Flags(t, Alice, "Drafts")[created.UID]; !slices.Equal(got, []string{`\Draft`, `\Seen`}) {
+		if got := f.Flags(t, Alice, "Drafts")[uidNumber(t, created.UID)]; !slices.Equal(got, []string{`\Draft`, `\Seen`}) {
 			t.Errorf("draft flags %q, want [\\Draft \\Seen]", got)
 		}
-		msg := muParse(t, f.RawMessage(t, Alice, "Drafts", created.UID))
+		msg := muParse(t, f.RawMessage(t, Alice, "Drafts", uidNumber(t, created.UID)))
 		for field, want := range map[string]mailmcp.Addresses{"To": in.To, "Cc": in.Cc, "Bcc": in.Bcc} {
 			if got := muAddresses(t, msg.header, field); !slices.Equal(got, want) {
 				t.Errorf("%s %q, want %q", field, got, want)
@@ -262,21 +264,24 @@ func TestDrafts(t *testing.T) {
 	})
 
 	t.Run("update_draft", func(t *testing.T) {
-		if created.UID == 0 {
+		if created.UID == "" {
 			t.Skip("create_draft failed")
 		}
+		oldUID := uidNumber(t, created.UID)
 		trash := f.UIDs(t, Alice, "Trash")
 		m := e.mark(t)
+		// The reference create_draft returned, used as is.
 		in := mailmcp.UpdateDraftIn{
-			Account: "alice", UIDValidity: drafts, UID: mailmcp.UID(created.UID),
+			Account: "alice", UIDValidity: mailmcp.UIDValidity(created.UIDValidity), UID: created.UID,
 			To: mailmcp.Addresses{"carol@example.test"}, Subject: "Quarterly report v2", Body: "Version two.",
 		}
 		got := muUpdateDraft.call(t, e.cs, in)
-		if got.UID <= created.UID || got.PreviousTrashed != "yes" || got.MessageID == created.MessageID {
-			t.Errorf("update_draft %+v, want a new UID above %d and previous_trashed yes", got, created.UID)
+		newUID := uidNumber(t, got.UID)
+		if newUID <= oldUID || got.PreviousTrashed != "yes" || got.MessageID == created.MessageID {
+			t.Errorf("update_draft %+v, want a new UID above %d and previous_trashed yes", got, oldUID)
 		}
-		if uids := f.UIDs(t, Alice, "Drafts"); !slices.Contains(uids, got.UID) || slices.Contains(uids, created.UID) {
-			t.Errorf("Drafts UIDs %v, want %d and not %d", uids, got.UID, created.UID)
+		if uids := f.UIDs(t, Alice, "Drafts"); !slices.Contains(uids, newUID) || slices.Contains(uids, oldUID) {
+			t.Errorf("Drafts UIDs %v, want %d and not %d", uids, newUID, oldUID)
 		}
 		after := f.UIDs(t, Alice, "Trash")
 		if len(after) != len(trash)+1 || !slices.Equal(after[:len(trash)], trash) {
@@ -286,7 +291,7 @@ func TestDrafts(t *testing.T) {
 			t.Errorf("new Trash message has Message-ID %q, want the old draft's %q", id, created.MessageID)
 		}
 		muAssertStrays(t, f, "Trash")
-		if got := muExpunges(e.eventsSince(t, m)); !slices.Equal(got, []string{"Drafts/" + strconv.Itoa(int(created.UID))}) {
+		if got := muExpunges(e.eventsSince(t, m)); !slices.Equal(got, []string{"Drafts/" + strconv.Itoa(int(oldUID))}) {
 			t.Errorf("expunges %q, want only the old draft in Drafts", got)
 		}
 
@@ -304,14 +309,15 @@ func TestDrafts(t *testing.T) {
 
 	t.Run("reply_draft", func(t *testing.T) {
 		// An 8-bit ISO-8859-1 source, unseen.
-		src := f.Seed(t, Alice, "INBOX", []byte("From: Old Sender <old@example.test>\r\nTo: alice@example.test\r\n"+
+		f.Seed(t, Alice, "INBOX", []byte("From: Old Sender <old@example.test>\r\nTo: alice@example.test\r\n"+
 			"Subject: =?iso-8859-1?q?caf=E9?=\r\nMessage-ID: <latin1@fixture.test>\r\nMIME-Version: 1.0\r\n"+
 			"Content-Type: text/plain; charset=iso-8859-1\r\nContent-Transfer-Encoding: 8bit\r\n\r\n"+
 			"caf\xe9 first\r\nend marker\r\n"))
+		src := e.refIn(t, "INBOX", "latin1@fixture.test")
 		flags := f.Flags(t, Alice, "INBOX")
 		m := e.mark(t)
-		got := muReplyDraft.call(t, e.cs, mailmcp.ReplyIn{Account: "alice", Mailbox: "INBOX", UIDValidity: inbox, UID: mailmcp.UID(src), Body: "Thanks, noted."})
-		msg := muParse(t, f.RawMessage(t, Alice, "Drafts", got.UID))
+		got := muReplyDraft.call(t, e.cs, mailmcp.ReplyIn{Account: src.Account, Mailbox: src.Mailbox, UIDValidity: src.UIDValidity, UID: src.UID, Body: "Thanks, noted."})
+		msg := muParse(t, f.RawMessage(t, Alice, "Drafts", uidNumber(t, got.UID)))
 		if irt := msg.header.Get("In-Reply-To"); irt != "<latin1@fixture.test>" {
 			t.Errorf("In-Reply-To %q, want <latin1@fixture.test>", irt)
 		}
@@ -330,12 +336,12 @@ func TestDrafts(t *testing.T) {
 	})
 
 	t.Run("forward_draft", func(t *testing.T) {
-		ref := mailmcp.RefIn{Account: "alice", Mailbox: "INBOX", UIDValidity: inbox, UID: 4}
+		ref := e.refIn(t, "INBOX", "alice-04@fixture.test")
 		dl := muDownload.call(t, e.cs, mailmcp.DownloadIn{Account: ref.Account, Mailbox: ref.Mailbox, UIDValidity: ref.UIDValidity, UID: ref.UID,
 			PartID: mailmcp.PartID(e.partIDs(t, ref)["../../evil.sh"])})
 		got := muForwardDraft.call(t, e.cs, mailmcp.ForwardIn{Account: ref.Account, Mailbox: ref.Mailbox, UIDValidity: ref.UIDValidity, UID: ref.UID,
 			To: mailmcp.Addresses{"carol@example.test"}, Attachments: mailmcp.FileNames{mailmcp.FileName(dl.File)}})
-		msg := muParse(t, f.RawMessage(t, Alice, "Drafts", got.UID))
+		msg := muParse(t, f.RawMessage(t, Alice, "Drafts", uidNumber(t, got.UID)))
 		if s := msg.subject(t); !strings.HasPrefix(s, "Fwd: ") {
 			t.Errorf("forward subject %q, want Fwd: ...", s)
 		}
@@ -362,6 +368,22 @@ func TestDrafts(t *testing.T) {
 		t.Errorf("Sent UIDs %v, want unchanged %v", got, sent)
 	}
 	e.assertTmpEmpty(t)
+
+	// Last: it saves drafts into INBOX. With the drafts role configured as
+	// "inbox", a draft's own reference and a listing of that mailbox both
+	// carry tags for INBOX, so each works where the other is expected.
+	t.Run("drafts role spelled inbox", func(t *testing.T) {
+		ie := muStart(t, f, func(c *ServerConfig) {
+			c.Accounts["alice"].Mailboxes.Inbox = "Folders/Projects"
+			c.Accounts["alice"].Mailboxes.Drafts = "inbox"
+		})
+		d := muCreateDraft.call(t, ie.cs, mailmcp.DraftIn{Account: "alice", Subject: "drafts in INBOX"})
+		muReadMessage.call(t, ie.cs, mailmcp.ReadIn{Account: "alice", Mailbox: mailmcp.Mailbox(d.Mailbox), UIDValidity: mailmcp.UIDValidity(d.UIDValidity), UID: d.UID})
+		listed := ie.refIn(t, "inbox", d.MessageID)
+		if got := muUpdateDraft.call(t, ie.cs, mailmcp.UpdateDraftIn{Account: "alice", UIDValidity: listed.UIDValidity, UID: listed.UID, Subject: "v2"}); got.PreviousTrashed != "yes" {
+			t.Errorf("update_draft %+v, want previous_trashed yes", got)
+		}
+	})
 }
 
 // TestMovesAndTrash: moves, trash, restore, flags and labels change
@@ -376,14 +398,15 @@ func TestMovesAndTrash(t *testing.T) {
 		status := func(mb string) mailmcp.UIDValidity { return mailmcp.UIDValidity(f.Status(t, Alice, mb).UIDValidity) }
 		inbox := status("INBOX")
 		const unicode = "Résumé/Ünïcødé 📬"
+		first, draft := e.refIn(t, "INBOX", "alice-01@fixture.test"), e.refIn(t, "Drafts", "alice-08@fixture.test")
 		m := e.mark(t)
 
 		t.Run("forbidden", func(t *testing.T) {
 			for _, to := range []mailmcp.Mailbox{"INBOX", "inbox", "Drafts", "Sent", "Labels/Work", "labels/work"} {
-				muMove.wantCode(t, e.cs, mailmcp.MoveIn{Account: "alice", Mailbox: "INBOX", UIDValidity: inbox, UIDs: mailmcp.UIDs{1}, To: to}, himalaya.CodeForbidden)
+				muMove.wantCode(t, e.cs, mailmcp.MoveIn{Account: "alice", Mailbox: "INBOX", UIDValidity: inbox, UIDs: mailmcp.UIDs{first.UID}, To: to}, himalaya.CodeForbidden)
 			}
 			// Drafts and Sent messages may only go to trash.
-			muMove.wantCode(t, e.cs, mailmcp.MoveIn{Account: "alice", Mailbox: "Drafts", UIDValidity: status("Drafts"), UIDs: mailmcp.UIDs{1}, To: "INBOX"}, himalaya.CodeForbidden)
+			muMove.wantCode(t, e.cs, mailmcp.MoveIn{Account: "alice", Mailbox: "Drafts", UIDValidity: draft.UIDValidity, UIDs: mailmcp.UIDs{draft.UID}, To: "INBOX"}, himalaya.CodeForbidden)
 			if cmds := e.commandsSince(t, m); len(cmds) != 0 {
 				t.Errorf("policy refusals ran Himalaya: %q", cmds)
 			}
@@ -408,32 +431,35 @@ func TestMovesAndTrash(t *testing.T) {
 
 		t.Run("trash and restore", func(t *testing.T) {
 			trashed := moved(t, "INBOX", "Trash", "alice-01@fixture.test",
-				muTrash.call(t, e.cs, mailmcp.BatchIn{Account: "alice", Mailbox: "INBOX", UIDValidity: inbox, UIDs: mailmcp.UIDs{1}}))
+				muTrash.call(t, e.cs, mailmcp.BatchIn{Account: "alice", Mailbox: "INBOX", UIDValidity: inbox, UIDs: mailmcp.UIDs{first.UID}}))
 			expunged("INBOX", 1)
+			// The moved message has a new UID; list the target to find it.
+			listed := e.refIn(t, "Trash", "alice-01@fixture.test")
 			moved(t, "Trash", "INBOX", "alice-01@fixture.test",
-				muRestore.call(t, e.cs, mailmcp.RestoreIn{Account: "alice", UIDValidity: status("Trash"), UIDs: mailmcp.UIDs{mailmcp.UID(trashed)}}))
+				muRestore.call(t, e.cs, mailmcp.RestoreIn{Account: "alice", UIDValidity: listed.UIDValidity, UIDs: mailmcp.UIDs{listed.UID}}))
 			expunged("Trash", trashed)
 		})
 
 		t.Run("archive", func(t *testing.T) {
 			moved(t, "INBOX", "Archive", "alice-02@fixture.test",
-				muArchive.call(t, e.cs, mailmcp.BatchIn{Account: "alice", Mailbox: "INBOX", UIDValidity: inbox, UIDs: mailmcp.UIDs{2}}))
+				muArchive.call(t, e.cs, mailmcp.BatchIn{Account: "alice", Mailbox: "INBOX", UIDValidity: inbox, UIDs: mailmcp.UIDs{e.refIn(t, "INBOX", "alice-02@fixture.test").UID}}))
 			expunged("INBOX", 2)
 		})
 
 		t.Run("move into the Unicode folder", func(t *testing.T) {
 			moved(t, "INBOX", unicode, "alice-03@fixture.test",
-				muMove.call(t, e.cs, mailmcp.MoveIn{Account: "alice", Mailbox: "INBOX", UIDValidity: inbox, UIDs: mailmcp.UIDs{3}, To: unicode}))
+				muMove.call(t, e.cs, mailmcp.MoveIn{Account: "alice", Mailbox: "INBOX", UIDValidity: inbox, UIDs: mailmcp.UIDs{e.refIn(t, "INBOX", "alice-03@fixture.test").UID}, To: unicode}))
 			expunged("INBOX", 3)
 		})
 
 		t.Run("update_flags", func(t *testing.T) {
 			before := f.Flags(t, Alice, "INBOX")
+			fourth := e.refIn(t, "INBOX", "alice-04@fixture.test")
 			for _, step := range []struct {
 				on   bool
 				want []string
 			}{{true, []string{`\Flagged`, `\Seen`}}, {false, []string{}}} {
-				out := muUpdateFlags.call(t, e.cs, mailmcp.FlagsIn{Account: "alice", Mailbox: "INBOX", UIDValidity: inbox, UIDs: mailmcp.UIDs{4}, Seen: new(step.on), Flagged: new(step.on)})
+				out := muUpdateFlags.call(t, e.cs, mailmcp.FlagsIn{Account: "alice", Mailbox: "INBOX", UIDValidity: inbox, UIDs: mailmcp.UIDs{fourth.UID}, Seen: new(step.on), Flagged: new(step.on)})
 				after := f.Flags(t, Alice, "INBOX")
 				if out.Updated != 1 || !slices.Equal(after[4], step.want) {
 					t.Errorf("seen and flagged %v: updated %d, UID 4 flags %q, want 1 and %q", step.on, out.Updated, after[4], step.want)
@@ -446,13 +472,14 @@ func TestMovesAndTrash(t *testing.T) {
 		})
 
 		t.Run("labels", func(t *testing.T) {
-			out := muAddLabel.call(t, e.cs, mailmcp.AddLabelIn{Account: "alice", Mailbox: "INBOX", UIDValidity: inbox, UIDs: mailmcp.UIDs{5}, Label: "Labels/Work"})
+			out := muAddLabel.call(t, e.cs, mailmcp.AddLabelIn{Account: "alice", Mailbox: "INBOX", UIDValidity: inbox, UIDs: mailmcp.UIDs{e.refIn(t, "INBOX", "alice-05@fixture.test").UID}, Label: "Labels/Work"})
 			copies := muFind(t, f, "Labels/Work", "alice-05@fixture.test")
 			if out.Labeled != 1 || len(copies) != 1 || !slices.Equal(muFind(t, f, "INBOX", "alice-05@fixture.test"), []uint32{5}) {
 				t.Fatalf("add_label: labeled %d, copies in Labels/Work %v; want 1 copy and INBOX UID 5 kept", out.Labeled, copies)
 			}
 			work := f.UIDs(t, Alice, "Labels/Work")
-			rm := muRemoveLabel.call(t, e.cs, mailmcp.RemoveLabelIn{Account: "alice", Label: "Labels/Work", UIDValidity: status("Labels/Work"), UIDs: mailmcp.UIDs{mailmcp.UID(copies[0])}})
+			copied := e.refIn(t, "Labels/Work", "alice-05@fixture.test")
+			rm := muRemoveLabel.call(t, e.cs, mailmcp.RemoveLabelIn{Account: "alice", Label: "Labels/Work", UIDValidity: copied.UIDValidity, UIDs: mailmcp.UIDs{copied.UID}})
 			expunged("Labels/Work", copies[0])
 			left := slices.DeleteFunc(slices.Clone(work), func(u uint32) bool { return u == copies[0] })
 			if got := f.UIDs(t, Alice, "Labels/Work"); rm.Unlabeled != 1 || !slices.Equal(got, left) {
@@ -474,9 +501,10 @@ func TestMovesAndTrash(t *testing.T) {
 		f := StartFixture(t, FixtureOptions{Profile: ProfileNoMove})
 		e := muStart(t, f, nil)
 		inbox, archive := f.UIDs(t, Alice, "INBOX"), f.UIDs(t, Alice, "Archive")
+		first := e.refIn(t, "INBOX", "alice-01@fixture.test")
 		m := e.mark(t)
 		muMove.wantCode(t, e.cs, mailmcp.MoveIn{Account: "alice", Mailbox: "INBOX",
-			UIDValidity: mailmcp.UIDValidity(f.Status(t, Alice, "INBOX").UIDValidity), UIDs: mailmcp.UIDs{1}, To: "Archive"}, himalaya.CodeServerUnsupported)
+			UIDValidity: first.UIDValidity, UIDs: mailmcp.UIDs{first.UID}, To: "Archive"}, himalaya.CodeServerUnsupported)
 		if cmds := e.commandsSince(t, m); !slices.Equal(cmds, []string{"imap raw"}) {
 			t.Errorf("ran %q, want only the capability probe", cmds)
 		}
@@ -525,23 +553,31 @@ func TestStaleAndInvalidRefs(t *testing.T) {
 	}
 
 	t.Run("invalid input", func(t *testing.T) {
+		first := e.refIn(t, "INBOX", "alice-01@fixture.test")
+		_, tag, _ := strings.Cut(string(first.UID), ".")
 		m := e.mark(t)
-		muReadMessage.wantRejected(t, e.cs, read("INBOX", inbox, 0))
-		muReadMessage.wantRejected(t, e.cs, read("INBOX", inbox, 4294967295)) // Himalaya reads it as "*"
-		muUpdateFlags.wantRejected(t, e.cs, flag(inbox, 1, 1))
-		muReadMessage.wantRejected(t, e.cs, read("INBOX\x1b[2J", inbox, 1))
-		muMove.wantRejected(t, e.cs, mailmcp.MoveIn{Account: "alice", Mailbox: "INBOX", UIDValidity: inbox, UIDs: mailmcp.UIDs{1}, To: "Archive\u0085"})
+		muReadMessage.wantRejected(t, e.cs, read("INBOX", inbox, "1"))
+		muReadMessage.wantRejected(t, e.cs, read("INBOX", inbox, mailmcp.UID("0."+tag)))
+		muUpdateFlags.wantRejected(t, e.cs, flag(inbox, first.UID, first.UID))
+		muReadMessage.wantRejected(t, e.cs, read("INBOX\x1b[2J", inbox, first.UID))
+		muMove.wantRejected(t, e.cs, mailmcp.MoveIn{Account: "alice", Mailbox: "INBOX", UIDValidity: inbox, UIDs: mailmcp.UIDs{first.UID}, To: "Archive\u0085"})
+		// The schema allows ten digits; the handler refuses 4294967295, which Himalaya reads as "*".
+		muReadMessage.wantCode(t, e.cs, read("INBOX", inbox, mailmcp.UID("4294967295."+tag)), himalaya.CodeInvalidArgument)
 		if cmds := e.commandsSince(t, m); len(cmds) != 0 {
 			t.Errorf("rejected input ran Himalaya: %q", cmds)
 		}
 	})
 
 	t.Run("missing mailbox", func(t *testing.T) {
+		// A reference into a mailbox that then goes away.
+		gone := e.refIn(t, "Folders/Projects", "alice-13@fixture.test")
+		f.Doveadm(t, "mailbox", "rename", "-u", Alice.Login, "Folders/Projects", "Folders/Renamed")
+		first := e.refIn(t, "INBOX", "alice-01@fixture.test")
 		m := e.mark(t)
-		muReadMessage.wantCode(t, e.cs, read("Nope", inbox, 1), himalaya.CodeMailboxNotFound)
-		muMove.wantCode(t, e.cs, move("Nope", inbox, 1), himalaya.CodeMailboxNotFound)
+		muReadMessage.wantCode(t, e.cs, read(gone.Mailbox, gone.UIDValidity, gone.UID), himalaya.CodeMailboxNotFound)
+		muMove.wantCode(t, e.cs, move(gone.Mailbox, gone.UIDValidity, gone.UID), himalaya.CodeMailboxNotFound)
 		// A missing target is found by status, before any MOVE could be sent.
-		missingTarget := move("INBOX", inbox, 1)
+		missingTarget := move("INBOX", inbox, first.UID)
 		missingTarget.To = "Nope"
 		if text := muMove.wantCode(t, e.cs, missingTarget, himalaya.CodeMailboxNotFound); !strings.Contains(text, `"Nope"`) {
 			t.Errorf("mailbox_not_found text %q does not name Nope", text)
@@ -550,17 +586,16 @@ func TestStaleAndInvalidRefs(t *testing.T) {
 	})
 
 	t.Run("missing UID", func(t *testing.T) {
-		flags := f.Flags(t, Alice, "INBOX")
-		m := e.mark(t)
-		muUpdateFlags.wantCode(t, e.cs, flag(inbox, 999), himalaya.CodeNotFound)
-		muMove.wantCode(t, e.cs, move("INBOX", inbox, 999), himalaya.CodeNotFound)
+		// References taken before the expunge, so the server-side check decides.
+		second, fourth := e.refIn(t, "INBOX", "alice-02@fixture.test"), e.refIn(t, "INBOX", "alice-04@fixture.test")
 		// A gap below UIDNEXT, where Himalaya alone would report success.
 		f.Doveadm(t, "expunge", "-u", Alice.Login, "mailbox", "INBOX", "uid", "2")
-		delete(flags, 2)
-		if text := muUpdateFlags.wantCode(t, e.cs, flag(inbox, 4, 2), himalaya.CodeNotFound); !strings.Contains(text, "[2]") {
+		flags := f.Flags(t, Alice, "INBOX")
+		m := e.mark(t)
+		if text := muUpdateFlags.wantCode(t, e.cs, flag(inbox, fourth.UID, second.UID), himalaya.CodeNotFound); !strings.Contains(text, "[2]") {
 			t.Errorf("not_found text %q does not name UID 2", text)
 		}
-		muMove.wantCode(t, e.cs, move("INBOX", inbox, 2), himalaya.CodeNotFound)
+		muMove.wantCode(t, e.cs, move("INBOX", inbox, second.UID), himalaya.CodeNotFound)
 		noMutation(t, m)
 		if got := f.Flags(t, Alice, "INBOX"); !maps.EqualFunc(got, flags, slices.Equal) {
 			t.Errorf("INBOX flags changed from %v to %v", flags, got)
@@ -568,11 +603,13 @@ func TestStaleAndInvalidRefs(t *testing.T) {
 	})
 
 	t.Run("stale reference", func(t *testing.T) {
+		// Taken before the reset, so its tag holds and the status check decides.
+		first := e.refIn(t, "INBOX", "alice-01@fixture.test")
 		uids := f.UIDs(t, Alice, "INBOX")
 		f.SetUIDValidity(t, Alice, "INBOX", uv+1)
 		m := e.mark(t)
-		muReadMessage.wantCode(t, e.cs, read("INBOX", inbox, 1), himalaya.CodeStaleReference)
-		muMove.wantCode(t, e.cs, move("INBOX", inbox, 1), himalaya.CodeStaleReference)
+		muReadMessage.wantCode(t, e.cs, read("INBOX", inbox, first.UID), himalaya.CodeStaleReference)
+		muMove.wantCode(t, e.cs, move("INBOX", inbox, first.UID), himalaya.CodeStaleReference)
 		noMutation(t, m)
 		if got := f.UIDs(t, Alice, "INBOX"); !slices.Equal(got, uids) {
 			t.Errorf("INBOX UIDs %v, want unchanged %v", got, uids)
@@ -580,11 +617,11 @@ func TestStaleAndInvalidRefs(t *testing.T) {
 	})
 
 	t.Run("UIDVALIDITY reset before the move", func(t *testing.T) {
-		current := mailmcp.UIDValidity(f.Status(t, Alice, "INBOX").UIDValidity)
-		e.shim.SetHook(t, []string{"message", "move"}, f.SetUIDValidityArgv(Alice, "INBOX", uint32(current)+1))
+		first := e.refIn(t, "INBOX", "alice-01@fixture.test")
+		e.shim.SetHook(t, []string{"message", "move"}, f.SetUIDValidityArgv(Alice, "INBOX", uint32(first.UIDValidity)+1))
 		t.Cleanup(func() { e.shim.ClearHook(t) })
 		m := e.mark(t)
-		if text := muMove.wantCode(t, e.cs, move("INBOX", current, 1), himalaya.CodeOutcomeUncertain); !strings.Contains(text, `"INBOX"`) {
+		if text := muMove.wantCode(t, e.cs, move("INBOX", first.UIDValidity, first.UID), himalaya.CodeOutcomeUncertain); !strings.Contains(text, `"INBOX"`) {
 			t.Errorf("outcome_uncertain text %q does not name INBOX", text)
 		}
 		recs := e.shim.Records(t)[m.runs:]
@@ -600,12 +637,12 @@ func TestStaleAndInvalidRefs(t *testing.T) {
 	// The UIDVALIDITY check runs after the existence fetch, so a reset
 	// during the fetch stops the move.
 	t.Run("UIDVALIDITY reset during the existence fetch", func(t *testing.T) {
-		current := mailmcp.UIDValidity(f.Status(t, Alice, "INBOX").UIDValidity)
-		e.shim.SetHook(t, []string{"imap", "fetch"}, f.SetUIDValidityArgv(Alice, "INBOX", uint32(current)+1))
+		third := e.refIn(t, "INBOX", "alice-03@fixture.test")
+		e.shim.SetHook(t, []string{"imap", "fetch"}, f.SetUIDValidityArgv(Alice, "INBOX", uint32(third.UIDValidity)+1))
 		t.Cleanup(func() { e.shim.ClearHook(t) })
 		uids := f.UIDs(t, Alice, "INBOX")
 		m := e.mark(t)
-		muMove.wantCode(t, e.cs, move("INBOX", current, mailmcp.UID(uids[0])), himalaya.CodeStaleReference)
+		muMove.wantCode(t, e.cs, move("INBOX", third.UIDValidity, third.UID), himalaya.CodeStaleReference)
 		noMutation(t, m)
 		if got := f.UIDs(t, Alice, "INBOX"); !slices.Equal(got, uids) {
 			t.Errorf("INBOX UIDs %v, want unchanged %v", got, uids)
@@ -613,12 +650,12 @@ func TestStaleAndInvalidRefs(t *testing.T) {
 	})
 
 	t.Run("UIDVALIDITY reset while a reply renders", func(t *testing.T) {
-		current := mailmcp.UIDValidity(f.Status(t, Alice, "INBOX").UIDValidity)
-		e.shim.SetHook(t, []string{"message", "reply"}, f.SetUIDValidityArgv(Alice, "INBOX", uint32(current)+1))
+		src := e.refIn(t, "INBOX", "alice-05@fixture.test")
+		e.shim.SetHook(t, []string{"message", "reply"}, f.SetUIDValidityArgv(Alice, "INBOX", uint32(src.UIDValidity)+1))
 		t.Cleanup(func() { e.shim.ClearHook(t) })
 		drafts := f.UIDs(t, Alice, "Drafts")
 		m := e.mark(t)
-		muReplyDraft.wantCode(t, e.cs, mailmcp.ReplyIn{Account: "alice", Mailbox: "INBOX", UIDValidity: current, UID: 5, Body: "Noted."}, himalaya.CodeStaleReference)
+		muReplyDraft.wantCode(t, e.cs, mailmcp.ReplyIn{Account: "alice", Mailbox: "INBOX", UIDValidity: src.UIDValidity, UID: src.UID, Body: "Noted."}, himalaya.CodeStaleReference)
 		recs := e.shim.Records(t)[m.runs:]
 		if i := slices.IndexFunc(recs, func(r ShimRecord) bool { return commandPath(r.Argv) == "message reply" }); i < 0 || !recs[i].Hook || recs[i].HookError != "" {
 			t.Fatalf("the hook did not run cleanly before the reply: %+v", recs)
@@ -637,15 +674,12 @@ func TestStaleAndInvalidRefs(t *testing.T) {
 	// Composing and adding the new version leave time for a reset, after
 	// which the old uid may be another message, so it is not moved.
 	t.Run("UIDVALIDITY reset while update_draft saves", func(t *testing.T) {
-		current := mailmcp.UIDValidity(f.Status(t, Alice, "Drafts").UIDValidity)
+		draft := e.refIn(t, "Drafts", "alice-08@fixture.test")
 		old := muFind(t, f, "Drafts", "alice-08@fixture.test")
-		if len(old) != 1 {
-			t.Fatalf("Drafts holds alice-08 at %v, want one copy", old)
-		}
-		e.shim.SetHook(t, []string{"message", "add"}, f.SetUIDValidityArgv(Alice, "Drafts", uint32(current)+1))
+		e.shim.SetHook(t, []string{"message", "add"}, f.SetUIDValidityArgv(Alice, "Drafts", uint32(draft.UIDValidity)+1))
 		t.Cleanup(func() { e.shim.ClearHook(t) })
 		m := e.mark(t)
-		out := muUpdateDraft.call(t, e.cs, mailmcp.UpdateDraftIn{Account: "alice", UIDValidity: current, UID: mailmcp.UID(old[0]), Subject: "v2"})
+		out := muUpdateDraft.call(t, e.cs, mailmcp.UpdateDraftIn{Account: "alice", UIDValidity: draft.UIDValidity, UID: draft.UID, Subject: "v2"})
 		if out.PreviousTrashed != "no" || !strings.HasPrefix(out.Error, "stale_reference: ") {
 			t.Errorf("update_draft %+v, want previous_trashed no with stale_reference", out)
 		}
@@ -660,13 +694,12 @@ func TestStaleAndInvalidRefs(t *testing.T) {
 	// A reset between the checks and the download fetches another message's
 	// attachment, so nothing may reach files_dir.
 	t.Run("UIDVALIDITY reset during a download", func(t *testing.T) {
-		current := mailmcp.UIDValidity(f.Status(t, Alice, "INBOX").UIDValidity)
-		ref := mailmcp.RefIn{Account: "alice", Mailbox: "INBOX", UIDValidity: current, UID: 4}
+		ref := e.refIn(t, "INBOX", "alice-04@fixture.test")
 		part := e.partIDs(t, ref)["../../evil.sh"]
 		files := muDirNames(t, e.files.FilesDirs["alice"])
-		e.shim.SetHook(t, []string{"attachment", "download"}, f.SetUIDValidityArgv(Alice, "INBOX", uint32(current)+1))
+		e.shim.SetHook(t, []string{"attachment", "download"}, f.SetUIDValidityArgv(Alice, "INBOX", uint32(ref.UIDValidity)+1))
 		t.Cleanup(func() { e.shim.ClearHook(t) })
-		muDownload.wantCode(t, e.cs, mailmcp.DownloadIn{Account: "alice", Mailbox: "INBOX", UIDValidity: current, UID: 4, PartID: mailmcp.PartID(part)}, himalaya.CodeStaleReference)
+		muDownload.wantCode(t, e.cs, mailmcp.DownloadIn{Account: "alice", Mailbox: "INBOX", UIDValidity: ref.UIDValidity, UID: ref.UID, PartID: mailmcp.PartID(part)}, himalaya.CodeStaleReference)
 		if got := muDirNames(t, e.files.FilesDirs["alice"]); !slices.Equal(got, files) {
 			t.Errorf("files_dir holds %q, want unchanged %q", got, files)
 		}
@@ -677,18 +710,16 @@ func TestStaleAndInvalidRefs(t *testing.T) {
 	// is found again by listing the target and matching its message_id;
 	// its old reference works neither in INBOX nor in Trash.
 	t.Run("retry and references after a move", func(t *testing.T) {
-		current := mailmcp.UIDValidity(f.Status(t, Alice, "INBOX").UIDValidity)
-		// Distinct values, or an INBOX reference would address Trash.
-		f.SetUIDValidity(t, Alice, "Trash", uint32(current)+1000)
-		in := mailmcp.BatchIn{Account: "alice", Mailbox: "INBOX", UIDValidity: current, UIDs: mailmcp.UIDs{3}}
+		third := e.refIn(t, "INBOX", "alice-03@fixture.test")
+		in := mailmcp.BatchIn{Account: "alice", Mailbox: "INBOX", UIDValidity: third.UIDValidity, UIDs: mailmcp.UIDs{third.UID}}
 		muTrash.call(t, e.cs, in)
 		trash := f.UIDs(t, Alice, "Trash")
 		m := e.mark(t)
 		if text := muTrash.wantCode(t, e.cs, in, himalaya.CodeNotFound); !strings.Contains(text, "[3]") {
 			t.Errorf("not_found text %q does not name UID 3", text)
 		}
-		muReadMessage.wantCode(t, e.cs, read("INBOX", current, 3), himalaya.CodeNotFound)
-		muRestore.wantCode(t, e.cs, mailmcp.RestoreIn{Account: "alice", UIDValidity: current, UIDs: mailmcp.UIDs{3}}, himalaya.CodeStaleReference)
+		muReadMessage.wantCode(t, e.cs, read("INBOX", third.UIDValidity, third.UID), himalaya.CodeNotFound)
+		muRestore.wantCode(t, e.cs, mailmcp.RestoreIn{Account: "alice", UIDValidity: third.UIDValidity, UIDs: mailmcp.UIDs{third.UID}}, himalaya.CodeStaleReference)
 		noMutation(t, m)
 		if got := f.UIDs(t, Alice, "Trash"); !slices.Equal(got, trash) {
 			t.Errorf("Trash UIDs %v, want unchanged %v", got, trash)
@@ -698,10 +729,41 @@ func TestStaleAndInvalidRefs(t *testing.T) {
 		if len(listed.Messages) != 1 || listed.Messages[0].MessageID != "alice-03@fixture.test" {
 			t.Fatalf("first message in Trash %+v, want the trashed alice-03", listed.Messages)
 		}
-		muRestore.call(t, e.cs, mailmcp.RestoreIn{Account: "alice", UIDValidity: mailmcp.UIDValidity(listed.UIDValidity), UIDs: mailmcp.UIDs{mailmcp.UID(listed.Messages[0].UID)}})
+		muRestore.call(t, e.cs, mailmcp.RestoreIn{Account: "alice", UIDValidity: mailmcp.UIDValidity(listed.UIDValidity), UIDs: mailmcp.UIDs{listed.Messages[0].UID}})
 		if got := muFind(t, f, "INBOX", "alice-03@fixture.test"); len(got) != 1 {
 			t.Errorf("INBOX holds alice-03 at %v after restore, want one copy", got)
 		}
+	})
+
+	// With INBOX and Trash at the same UIDVALIDITY and an unrelated message
+	// at the same UID in Trash, an INBOX uid passed to restore_messages
+	// would move that message. Its tag stops it before any Himalaya run.
+	t.Run("INBOX uid in restore_messages at an equal UIDVALIDITY", func(t *testing.T) {
+		fourth := e.refIn(t, "INBOX", "alice-04@fixture.test")
+		n := uidNumber(t, fourth.UID)
+		for i := 0; !slices.Contains(f.UIDs(t, Alice, "Trash"), n); i++ {
+			if i == 10 {
+				t.Fatalf("Trash UIDs %v never reached %d", f.UIDs(t, Alice, "Trash"), n)
+			}
+			f.Seed(t, Alice, "Trash", Message(t, "bob-03-sent.eml"))
+		}
+		f.SetUIDValidity(t, Alice, "Trash", uint32(fourth.UIDValidity))
+		trash := f.UIDs(t, Alice, "Trash")
+		m := e.mark(t)
+		muRestore.wantCode(t, e.cs, mailmcp.RestoreIn{Account: "alice", UIDValidity: fourth.UIDValidity, UIDs: mailmcp.UIDs{fourth.UID}}, himalaya.CodeStaleReference)
+		if cmds := e.commandsSince(t, m); len(cmds) != 0 {
+			t.Errorf("ran %q, want no Himalaya run", cmds)
+		}
+		if got := f.UIDs(t, Alice, "Trash"); !slices.Equal(got, trash) {
+			t.Errorf("Trash UIDs %v, want unchanged %v", got, trash)
+		}
+	})
+
+	// Tags are keyed per process, so a restarted server refuses old UIDs.
+	t.Run("uid from another server process", func(t *testing.T) {
+		ref := e.refIn(t, "INBOX", "alice-04@fixture.test")
+		other := muStart(t, f, nil)
+		muReadMessage.wantCode(t, other.cs, read(ref.Mailbox, ref.UIDValidity, ref.UID), himalaya.CodeStaleReference)
 	})
 }
 
@@ -752,7 +814,8 @@ func TestAmbiguousWrites(t *testing.T) {
 	})
 
 	t.Run("trash_messages", func(t *testing.T) {
-		in := mailmcp.BatchIn{Account: "alice", Mailbox: "INBOX", UIDValidity: mailmcp.UIDValidity(f.Status(t, Alice, "INBOX").UIDValidity), UIDs: mailmcp.UIDs{1}}
+		first := e.refIn(t, "INBOX", "alice-01@fixture.test")
+		in := mailmcp.BatchIn{Account: "alice", Mailbox: "INBOX", UIDValidity: first.UIDValidity, UIDs: mailmcp.UIDs{first.UID}}
 		done := failAfter(t, "message", "move")
 		muTrash.wantCode(t, e.cs, in, himalaya.CodeOutcomeUncertain)
 		done()
@@ -770,11 +833,11 @@ func TestAmbiguousWrites(t *testing.T) {
 		old := muCreateDraft.call(t, e.cs, mailmcp.DraftIn{Account: "alice", Subject: "v1"})
 		done := failAfter(t, "message", "add")
 		m := e.mark(t)
-		text := muUpdateDraft.wantCode(t, e.cs, mailmcp.UpdateDraftIn{Account: "alice", UIDValidity: mailmcp.UIDValidity(old.UIDValidity), UID: mailmcp.UID(old.UID), Subject: "v2"}, himalaya.CodeOutcomeUncertain)
+		text := muUpdateDraft.wantCode(t, e.cs, mailmcp.UpdateDraftIn{Account: "alice", UIDValidity: mailmcp.UIDValidity(old.UIDValidity), UID: old.UID, Subject: "v2"}, himalaya.CodeOutcomeUncertain)
 		done()
 		savedOnce(t, text)
-		if got := muFind(t, f, "Drafts", old.MessageID); !slices.Equal(got, []uint32{old.UID}) {
-			t.Errorf("Drafts holds the previous draft at %v, want it left at %d", got, old.UID)
+		if got := muFind(t, f, "Drafts", old.MessageID); !slices.Equal(got, []uint32{uidNumber(t, old.UID)}) {
+			t.Errorf("Drafts holds the previous draft at %v, want it left at %s", got, old.UID)
 		}
 		if cmds := e.commandsSince(t, m); slices.Contains(cmds, "message move") {
 			t.Errorf("ran %q, want no message move", cmds)
@@ -866,6 +929,31 @@ func muStart(t *testing.T, f *Fixture, edit func(*ServerConfig)) *muEnv {
 	shim := BuildShim(t, HimalayaPath(t))
 	files := WriteServerConfig(t, ServerOptions{Fixture: f, Shim: shim, Edit: edit})
 	return &muEnv{f: f, shim: shim, files: files, cs: StartStdio(t, bin, files)}
+}
+
+// refIn lists mailbox through list_messages, as an agent would, and returns
+// the reference of the message whose Message-ID is id.
+func (e *muEnv) refIn(t *testing.T, mailbox, id string) mailmcp.RefIn {
+	t.Helper()
+	out := muListMessages.call(t, e.cs, mailmcp.ListMessagesIn{Account: "alice", Mailbox: mailmcp.Mailbox(mailbox), PageSize: 50})
+	for _, m := range out.Messages {
+		if m.MessageID == id {
+			return mailmcp.RefIn{Account: "alice", Mailbox: mailmcp.Mailbox(mailbox), UIDValidity: mailmcp.UIDValidity(out.UIDValidity), UID: m.UID}
+		}
+	}
+	t.Fatalf("list_messages on %s has no %s", mailbox, id)
+	return mailmcp.RefIn{}
+}
+
+// uidNumber returns the IMAP UID in a tagged uid, for doveadm checks.
+func uidNumber[U ~string](t testing.TB, u U) uint32 {
+	t.Helper()
+	num, _, _ := strings.Cut(string(u), ".")
+	n, err := strconv.ParseUint(num, 10, 32)
+	if err != nil {
+		t.Fatalf("uid %q has no number", u)
+	}
+	return uint32(n)
 }
 
 // muCheckCommands are the commands the wrapper runs to check a call before
