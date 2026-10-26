@@ -231,9 +231,15 @@ func (s *Server) updateDraft(ctx context.Context, in UpdateDraftIn) (UpdateDraft
 	return out, nil
 }
 
-// trashOld moves the previous draft to trash and confirms UIDVALIDITY afterwards.
+// trashOld moves the previous draft to trash and confirms UIDVALIDITY
+// afterwards. It checks the reference again first: composing and adding the
+// new version take long enough for a UIDVALIDITY reset to give uid to
+// another message.
 func (s *Server) trashOld(ctx context.Context, a *account, uv, uid uint32) error {
 	drafts, trash := a.cfg.Mailboxes.Drafts, a.cfg.Mailboxes.Trash
+	if _, err := s.checkRef(ctx, a, drafts, uv, []uint32{uid}); err != nil {
+		return err
+	}
 	raw, err := s.run.Run(ctx, a.hx.Move(drafts, trash, []uint32{uid}))
 	if err != nil {
 		return uncertain(err, fmt.Sprintf("move of draft %d to %q", uid, trash))

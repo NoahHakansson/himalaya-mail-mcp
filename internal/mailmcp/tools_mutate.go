@@ -146,7 +146,7 @@ type MoveOut struct {
 	Note  string `json:"note"`
 }
 
-const moveNote = "moved messages get new UIDs in the target mailbox; list it to find them"
+const moveNote = "moved messages get new UIDs in the target mailbox; list it and match by message_id to find them"
 
 func (s *Server) moveMessages(ctx context.Context, in MoveIn) (MoveOut, error) {
 	a, mb, uv, uids, err := s.batchIn(in.Account, in.Mailbox, in.UIDValidity, in.UIDs)

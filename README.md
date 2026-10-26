@@ -10,7 +10,7 @@ Bridge handles Proton login, encryption and sync. The wrapper reaches it only th
 
 ## Tools
 
-Every tool except list_accounts takes `account`. A message reference is `{account, mailbox, uidvalidity, uid}` from list_messages or search_messages. R is read-only, W adds state, D removes state (a flag, a location or a label).
+Every tool except list_accounts takes `account`. A message reference is `{account, mailbox, uidvalidity, uid}` as list_messages, search_messages or a draft tool returned it; a UID is valid only with its own mailbox and uidvalidity. R is read-only, W adds state, D removes state (a flag, a location or a label).
 
 | tool | what it does | hint |
 |---|---|---|
@@ -179,8 +179,8 @@ himalaya-mail-mcp -config /etc/himalaya-mail-mcp/config.json http    # Streamabl
 
 ## Recovery
 
-- `outcome_uncertain`: a mutating step failed after its command may have reached the server, or UIDVALIDITY could not be confirmed afterwards. Do not retry. List the mailboxes named in the error first; for drafts the error carries the composed `message_id`, which list_messages on Drafts shows.
-- `partial`: only some UIDs moved or were labeled; the detail has the count. `stale_reference`: a Bridge resync changed UIDVALIDITY; list again.
+- `outcome_uncertain`: a mutating step failed after its command may have reached the server, or UIDVALIDITY could not be confirmed afterwards. A call that ended without a result, such as a client timeout, is the same case, and it can keep running on the server until `call_timeout_seconds` after it started, so wait that long before concluding a draft was not saved. List the mailboxes named in the error before acting again; for drafts the error carries the composed `message_id`, which list_messages on Drafts shows. Retrying a draft tool saves another draft. Flags, moves and remove_label are safe to retry: UIDs that already left the mailbox make the call fail with `not_found` and nothing changes.
+- `partial`: only some UIDs moved or were labeled; the detail has the count. `stale_reference`: a Bridge resync changed UIDVALIDITY, or the reference came from another mailbox; list again.
 - Restore from Trash with list_messages on the trash mailbox, then restore_messages with `to`. The original folder is not recorded.
 - update_draft with `previous_trashed` `no` or `uncertain` saved the new draft, but the old one may still be in Drafts; `error` says why. List Drafts and trash the old UID. If the new version failed, the error says the previous draft was left in place.
 - Token rotation: write the new token to `token_file`, restart `http`, then update the client. Calls get 401 in between.
